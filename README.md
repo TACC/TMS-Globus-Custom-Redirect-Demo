@@ -1,0 +1,201 @@
+# idp_redirect_demo
+
+A minimal Rust/axum example of using Globus Auth's `redirect_idp_domain`
+authorize parameter, driven by a **mocked JSON list of approved institutions**,
+plus a **test OpenID Connect provider** that plays the TACC login page.
+It is shaped after `tms_portal`'s `application/src/routes/login.rs`
+(`/login` → Globus authorize redirect → `/login/callback`), with the one
+addition being `redirect_idp_domain`.
+
+> `redirect_idp_domain` replaces the `idp_redirect_domain` parameter in the
+> Globus Auth developer guide, which Globus does not act on (every domain we
+> tried, including the guide's own `uchicago.edu`, still showed the Globus
+> organization picker). Per Globus support, the new parameter ships to
+> production on 2026-10-22.
+
+## What it shows
+
+1. `GET /login/institutions` serves only the `approved: true` entries from
+   `mock/approved_institutions.json` (Tapis-style envelope:
+   `status / message / version / result`).
+2. `GET /login?institution=tacc` looks the id up in that approved list
+   (unknown or unapproved ids get a 403), then redirects to:
+
+   ```
+   https://auth.globus.org/v2/oauth2/authorize
+     ?response_type=code&client_id=…&redirect_uri=…/login/callback
+     &scope=openid+profile+email&state=…
+     &redirect_idp_domain=tacc.utexas.edu
+   ```
+
+   A user who isn't already signed in to Globus skips the Globus login page and
+   goes straight to the authorization endpoint of the IdP Globus has registered
+   for that domain.
+3. `GET /login/callback` checks the state cookie, exchanges the code, calls
+   Globus `userinfo`, and **verifies the returned `preferred_username` is
+   `@<redirect_idp_domain>`**. This matters: `redirect_idp_domain` is a
+   convenience redirect, not an access control. A user already signed in with
+   another identity, or one who edits the URL, can come back as someone else,
+   so the server has to check.
+
+Add `&dry_run=true` to `/login` to get the authorize URL as JSON instead of
+being redirected.
+
+## The test IdP (`src/test_idp.rs`)
+
+`redirect_idp_domain` only redirects to an IdP that is registered with Globus
+Auth for that domain. Globus sends the user to that IdP's
+`authorization_endpoint`, so "your custom login page" is simply the
+authorization endpoint of an OIDC server. The demo serves one under `/idp`:
+
+| Route                                    | Purpose                                         |
+|------------------------------------------|-------------------------------------------------|
+| `GET  /idp/.well-known/openid-configuration` | Discovery document (what Globus registers)  |
+| `GET  /idp/jwks.json`                    | RS256 public key                                |
+| `GET  /idp/authorize`                    | **The custom login page.** Shows the request it received and its `Referer`; logs a `[test-idp] authorize` line |
+| `POST /idp/authorize`                    | Login form → redirect to `redirect_uri?code&state` |
+| `POST /idp/token`                        | Code → `access_token` + signed `id_token` (`client_secret_basic` or `_post`) |
+| `GET  /idp/userinfo`                     | Claims for a bearer access token                |
+
+Users sign in with a bare username and come back as
+`<username>@<IDP_DOMAIN>` (`sub`, `preferred_username` and `email`). Codes are
+single-use, expire in two minutes, and are bound to the client and
+`redirect_uri`. Only the registered client (`IDP_CLIENT_ID`) and
+`redirect_uri`s are accepted.
+
+`tms_portal` cannot be registered for this as it stands: its `/oauth2` routes
+broker to an upstream IdP (Globus itself), its discovery and token responses
+are wrapped in the TMS response envelope, its token endpoint takes JSON rather
+than a form post, and it returns an empty `id_token`.
+
+## Run it offline (no Globus account needed)
+
+```bash
+cargo run
+# open http://localhost:8080
+```
+
+With no Globus credentials set, the authorize redirect points at a built-in
+`/mock-globus/authorize` page.
+
+- **TACC** (`tacc.utexas.edu`, the test IdP's domain): mock Globus does what
+  real Globus will do once the IdP is registered. It sends you straight to
+  `/idp/authorize`, then redeems the code at `/idp/token` and verifies the
+  `id_token` against the JWKS, exactly as a client would
+  (`test_idp::relying_party_login`). Any failure there is shown as "Test IdP
+  failed the client checks". This is a conformance check of the IdP before
+  you register it.
+- **Other institutions**: the mock page shows the `redirect_idp_domain` it
+  received and lets you choose which identity "comes back". Use
+  `jdoe@uchicago.edu` for the success path, or `jdoe@globusid.org` to see the
+  callback reject a non-matching identity.
+
+## Test `redirect_idp_domain` against real Globus
+
+1. **Host the demo on public HTTPS.** Globus Auth calls the discovery, token
+   and JWKS endpoints itself, so `localhost` will not do. Use a host whose
+   domain you can prove, e.g. `https://idp-test.tacc.utexas.edu`, behind a
+   TLS-terminating reverse proxy:
+
+   ```bash
+   export BASE_URL=https://idp-test.tacc.utexas.edu
+   export BIND_ADDR=127.0.0.1:8080
+   export IDP_CLIENT_SECRET=$(openssl rand -hex 32)   # keep it; Globus registers it
+   cargo run --release
+   ```
+
+   Check `curl $BASE_URL/idp/.well-known/openid-configuration` from outside.
+   `idp_signing_key.pem` is created on first run; keep it, so the JWKS
+   Globus has seen stays valid.
+
+2. **Register the test IdP with Globus Auth.** On a Globus Connect Server v5
+   data transfer node that has been through `node setup`, as root
+   ([reference](https://docs.globus.org/globus-connect-server/v5/reference/oidc/register/)):
+
+   ```bash
+   globus-connect-server oidc register \
+       --display-name "TACC (test)" \
+       --discovery-url "https://idp-test.tacc.utexas.edu/idp/.well-known/openid-configuration" \
+       --domain "tacc.utexas.edu" \
+       --client-id "globus-auth-client" \
+       --client-secret "$IDP_CLIENT_SECRET" \
+       --username-claim "preferred_username" \
+       --id-claim "sub" \
+       --support-contact "<name>" \
+       --support-email "<email>"
+   ```
+
+   Domain ownership is proven with a DNS TXT record on each domain containing
+   the endpoint's client id; the registration fails until it exists, and can
+   be rerun with the same arguments. Globus returns users to
+   `https://auth.globus.org/p/authenticate/callback`, which is the default
+   `IDP_REDIRECT_URIS`.
+
+3. **Point the demo at real Globus.** Add
+   `https://idp-test.tacc.utexas.edu/login/callback` as a redirect URI on
+   your Globus app at <https://app.globus.org/settings/developers>, then
+   restart with `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` also set.
+
+4. **Run the test** in a private window (an existing Globus session is not
+   redirected): open `$BASE_URL`, click **Log in** for TACC.
+   - Pass: you land directly on the orange "TACC test login" page (its
+     `referer` row shows `auth.globus.org`, and the server logs
+     `[test-idp] authorize`), sign in, and finish on "Welcome" with
+     `jdoe@tacc.utexas.edu`.
+   - Fail: the Globus organization picker appears. Use `see URL` to confirm
+     `redirect_idp_domain=tacc.utexas.edu` was sent.
+   - Token problems: Globus's calls show up as `[test-idp] token …` lines.
+
+## Configuration
+
+| Env var                 | Default                                            |
+|-------------------------|----------------------------------------------------|
+| `BASE_URL`              | `http://localhost:8080`                            |
+| `BIND_ADDR`             | `127.0.0.1:8080`                                   |
+| `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
+| `GLOBUS_CLIENT_ID`      | unset → mock mode                                  |
+| `GLOBUS_CLIENT_SECRET`  | unset → mock mode                                  |
+| `IDP_DOMAIN`            | `tacc.utexas.edu`                                  |
+| `IDP_CLIENT_ID`         | `globus-auth-client`                               |
+| `IDP_CLIENT_SECRET`     | random per run (printed at startup)                |
+| `IDP_REDIRECT_URIS`     | `https://auth.globus.org/p/authenticate/callback` (comma-separated; the mock callback is always added) |
+| `IDP_SIGNING_KEY`       | `idp_signing_key.pem` (created if missing)         |
+
+The test IdP's issuer is always `<BASE_URL>/idp`.
+
+## Mapping to TMS
+
+- In `tms_portal`, the authorize URL is built in `login_handler` from the
+  `identity_providers` row (`identity_redirect_url`, `client_id`, `scope`).
+  Adding `("redirect_idp_domain", domain)` to its `query_params` vector is the
+  same change shown in `src/globus.rs::build_authorize_url`.
+- The approved list would naturally live in a DB table next to
+  `identity_providers` / `allowed_redirects`, served by an endpoint like
+  `/login/idps`. The mocked JSON stands in for that.
+- The callback check corresponds to a guard in `handle_callback` before
+  `make_auth_token`, using the `preferred_username` / `organization` claims
+  that `jwt_utils.rs` already reads.
+- The flow is the standard authorization-code grant described in the Tapis
+  authentication docs: one controller redirects to the authorize endpoint
+  with `client_id`, `redirect_uri` and `response_type=code`, and a second
+  handles the callback and exchanges the code at the token endpoint.
+
+## Tests
+
+```bash
+cargo test
+```
+
+Covers: unapproved institutions are filtered out, the authorize URL carries
+`redirect_idp_domain`, identity/domain matching (including look-alike
+domains such as `evil-uchicago.edu`), and for the test IdP: JWT signatures
+verify only against its own JWKS, codes are single-use and bound to
+client/`redirect_uri`, and a full discovery → token → `id_token` check over
+real HTTP (including a rejected bad client secret).
+
+## Not production-ready
+
+The state cookie is unsigned and has no expiry, there is no session after
+login, the test IdP has no real passwords and keeps codes and tokens in
+memory, and the mock endpoints should never be deployed. TMS already handles
+these with encoded state, DB-backed nonces and its own JWTs.

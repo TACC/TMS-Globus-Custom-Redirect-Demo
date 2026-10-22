@@ -1,0 +1,37 @@
+{
+  "status": "success",
+  "message": "Approved institutions retrieved.",
+  "version": "mock-0.1.0",
+  "result": [
+    {
+      "id": "uchicago",
+      "name": "University of Chicago",
+      "redirect_idp_domain": "uchicago.edu",
+      "approved": true
+    },
+    {
+      "id": "utexas",
+      "name": "The University of Texas at Austin",
+      "redirect_idp_domain": "utexas.edu",
+      "approved": true
+    },
+    {
+      "id": "illinois",
+      "name": "University of Illinois Urbana-Champaign",
+      "redirect_idp_domain": "illinois.edu",
+      "approved": true
+    },
+    {
+      "id": "tacc",
+      "name": "Texas Advanced Computing Center",
+      "redirect_idp_domain": "tacc.utexas.edu",
+      "approved": true
+    },
+    {
+      "id": "example",
+      "name": "Example University (pending review)",
+      "redirect_idp_domain": "example.edu",
+      "approved": false
+    }
+  ]
+}

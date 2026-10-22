@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Institution Login Demo</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1d2330; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+       padding: .7rem 0; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
+  code { background: #f2f3f5; padding: .1rem .3rem; border-radius: 3px; }
+  .note { color: #5b6475; }
+  a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
+  a.dry { margin-left: .6rem; font-size: .9rem; }
+</style>
+</head>
+<body>
+  <h1>Log in with your institution</h1>
+  <p class="note">The list below comes from <code>GET /login/institutions</code>, which serves only the
+  <em>approved</em> entries of <code>mock/approved_institutions.json</code>. Choosing one sends you to
+  Globus Auth with <code>redirect_idp_domain</code> set to that institution's domain.</p>
+  <ul id="list"><li>Loading…</li></ul>
+  <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
+<script>
+  fetch('/login/institutions')
+    .then(r => r.json())
+    .then(body => {
+      const ul = document.getElementById('list');
+      ul.innerHTML = '';
+      for (const inst of body.result) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.innerHTML = '<b></b> <code></code>';
+        label.querySelector('b').textContent = inst.name;
+        label.querySelector('code').textContent = inst.redirect_idp_domain;
+        const actions = document.createElement('span');
+        const q = 'institution=' + encodeURIComponent(inst.id);
+        actions.innerHTML = `<a class="btn" href="/login?${q}">Log in</a><a class="dry" href="/login?${q}&dry_run=true">see URL</a>`;
+        li.append(label, actions);
+        ul.append(li);
+      }
+    })
+    .catch(e => { document.getElementById('list').textContent = 'Failed to load institutions: ' + e; });
+</script>
+</body>
+</html>
