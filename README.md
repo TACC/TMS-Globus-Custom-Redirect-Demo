@@ -43,7 +43,9 @@ addition being `redirect_idp_domain`.
    so the server has to check.
 
 Add `&dry_run=true` to `/login` to get the authorize URL as JSON instead of
-being redirected.
+being redirected. For an unapproved institution it answers 403 with the
+blocked message, `"blocked": true`, and the authorize URL it would have used
+if approved (shown under the message in the "see URL" popup).
 
 Two entries in the mock list are not institution redirects:
 

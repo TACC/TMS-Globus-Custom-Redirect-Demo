@@ -24,6 +24,8 @@
   dialog::backdrop { background: rgba(20, 25, 35, .45); }
   dialog h2 { margin: 0 0 .6rem; font-size: 1.1rem; }
   #url-text { display: block; padding: .6rem; word-break: break-all; }
+  #url-blocked { color: #a12121; margin: 0 0 .6rem; }
+  #url-blocked:empty { display: none; }
   dialog .actions { display: flex; justify-content: flex-end; margin-top: 1rem; }
   dialog button { font: inherit; padding: .35rem .9rem; }
 </style>
@@ -39,6 +41,7 @@
   <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
   <dialog id="url-dialog" aria-labelledby="url-title">
     <h2 id="url-title"></h2>
+    <p id="url-blocked"></p>
     <code id="url-text"></code>
     <p class="note" id="url-mode"></p>
     <form method="dialog" class="actions"><button>Close</button></form>
@@ -52,13 +55,21 @@
     document.getElementById('url-title').textContent = 'Authorize URL for ' + inst.name;
     const text = document.getElementById('url-text');
     const mode = document.getElementById('url-mode');
+    const blocked = document.getElementById('url-blocked');
     text.textContent = 'Loading…';
     mode.textContent = '';
+    blocked.textContent = '';
     dialog.showModal();
     fetch(dryRunHref)
       .then(r => r.json())
       .then(body => {
-        if (body.status !== 'success') throw new Error(body.message);
+        // Unapproved institutions come back as an error that still carries
+        // the authorize URL they would have used.
+        if (!body.result?.authorize_url) throw new Error(body.message);
+        if (body.result.blocked) {
+          blocked.textContent = `Blocked: ${inst.name} is not on the approved list, so Log in does not use this URL. ` +
+            'This is the authorize URL it would have used if approved:';
+        }
         text.textContent = body.result.authorize_url;
         mode.textContent = body.result.mock_mode ? 'Mock mode: this points at the built-in mock Globus.' : '';
       })

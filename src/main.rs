@@ -255,15 +255,9 @@ async fn login(
     };
 
     // Unapproved institutions never reach Globus or Tapis: no redirect, no
-    // state cookie, just the reason.
-    if !inst.approved {
-        if p.dry_run {
-            return tapis_style(
-                StatusCode::FORBIDDEN,
-                &format!("Institution '{}' is not on the approved list; login is blocked.", inst.id),
-                json!(null),
-            );
-        }
+    // state cookie, just the reason. (dry_run still shows the URL it would
+    // have used, below.)
+    if !inst.approved && !p.dry_run {
         return (StatusCode::FORBIDDEN, Html(page_filtered(inst))).into_response();
     }
 
@@ -288,12 +282,25 @@ async fn login(
     };
 
     if p.dry_run {
+        let (status, message) = if inst.approved {
+            (StatusCode::OK, "Authorize URL (not redirecting: dry_run=true).".to_string())
+        } else {
+            (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Institution '{}' is not on the approved list; login is blocked. \
+                     authorize_url is what it would have used if approved.",
+                    inst.id
+                ),
+            )
+        };
         return tapis_style(
-            StatusCode::OK,
-            "Authorize URL (not redirecting: dry_run=true).",
+            status,
+            &message,
             json!({
                 "institution": inst,
                 "mock_mode": app.globus.is_mock(),
+                "blocked": !inst.approved,
                 "authorize_url": url.as_str(),
             }),
         );
