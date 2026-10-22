@@ -1,15 +1,21 @@
-//! idp_redirect_demo — pick an approved institution, get sent straight to its
-//! IdP via Globus Auth's `redirect_idp_domain`, then verify on callback that the
-//! returned identity really belongs to that institution.
+//! idp_redirect_demo — pick an institution, get sent straight to its IdP via
+//! Globus Auth's `redirect_idp_domain`, then on callback check that it is on
+//! the approved list and that the returned identity really belongs to it. Two extra entries show
+//! Globus's default login (no `redirect_idp_domain`) and a direct Tapis
+//! OAuth2 login (tms_portal's TaccTapis provider).
 //!
 //! Routes (shaped like tms_portal's routes/login.rs):
 //!   GET /                       landing page (a single Login button to /demo)
 //!   GET /demo                   demo page
-//!   GET /login/institutions     approved institutions (from the mocked JSON)
-//!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it)
-//!   GET /login/callback         code -> userinfo -> institution check
-//!   GET /login/status           whether this browser has a Globus login session with the app
-//!   POST /logout                revoke the Globus token, clear cookies, end the Globus session, back to /
+//!   GET /login/institutions     all institutions with their `approved` flag (from the mocked JSON)
+//!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
+//!                               unapproved institutions get the "Filtered" page instead
+//!   GET /login/callback         code -> userinfo -> approved-list and institution checks
+//!   GET /login/status           whether this browser has a login session with the app
+//!   POST /logout                revoke the token, clear cookies, end the Globus session, back to /
+//!                               (?local=true: revoke and clear only, 204 instead of a redirect)
+//!   GET /logout/idp?institution=ID  after Globus sign-out, on to that institution's IdP sign-out
+//!   GET <TAPIS_CALLBACK_URL>    relays Tapis's response to /login/callback (when set)
 //!   GET /mock-globus/authorize  stand-in for auth.globus.org when GLOBUS_MOCK=true
 //!   GET /mock-globus/approve    mock "user authenticated" step
 //!   GET /mock-globus/idp-callback  mock Globus acting as the test IdP's client
@@ -17,10 +23,11 @@
 
 mod globus;
 mod institutions;
+mod tapis;
 mod test_idp;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Query, RawQuery, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -29,11 +36,12 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
-use institutions::{identity_matches, Institution, Registry};
+use institutions::{identity_matches, Institution, Provider, Registry};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tapis::TapisConfig;
 use test_idp::TestIdp;
 
 const STATE_COOKIE: &str = "idp_demo_state";
@@ -42,12 +50,21 @@ const SESSION_COOKIE: &str = "idp_demo_session";
 #[derive(Clone)]
 struct AppState {
     globus: Arc<GlobusConfig>,
+    tapis: Arc<TapisConfig>,
     registry: Arc<Registry>,
     idp: Arc<TestIdp>,
     base_url: String,
-    /// Session id -> Globus access token (None in mock mode), held server-side
-    /// so logout can revoke it.
-    sessions: Arc<Mutex<HashMap<String, Option<String>>>>,
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
+}
+
+/// A completed login, keyed by the session cookie. The token is held
+/// server-side so logout can revoke it.
+struct Session {
+    /// The entry logged in with, so the page can turn its button into "Log out".
+    institution: String,
+    provider: Provider,
+    /// None in mock mode.
+    token: Option<String>,
 }
 
 #[tokio::main]
@@ -83,6 +100,19 @@ async fn main() {
         callback_url: format!("{base_url}/login/callback"),
     };
 
+    // TaccTapis is optional: without its credentials only that entry fails.
+    let tapis = TapisConfig {
+        client: match (std::env::var("TAPIS_CLIENT_ID"), std::env::var("TAPIS_CLIENT_SECRET")) {
+            (Ok(id), Ok(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => Some((id, secret)),
+            _ => None,
+        },
+        base_url: env_or("TAPIS_BASE_URL", tapis::TAPIS_BASE_URL),
+        // Tapis only accepts the callback URL registered for its client.
+        callback_url: env_or("TAPIS_CALLBACK_URL", &globus.callback_url),
+    };
+    let tapis_relay = (tapis.callback_url != globus.callback_url)
+        .then(|| url::Url::parse(&tapis.callback_url).expect("TAPIS_CALLBACK_URL must be a valid URL"));
+
     let registry = Registry::load(&inst_file).unwrap_or_else(|e| panic!("{e}"));
     println!(
         "Loaded {} approved institution(s) from {inst_file}",
@@ -92,6 +122,12 @@ async fn main() {
         "Mode: {}",
         if globus.is_mock() { "MOCK Globus (GLOBUS_MOCK=true)" } else { "real Globus Auth" }
     );
+    if !globus.is_mock() {
+        println!(
+            "TaccTapis: {}",
+            if tapis.client.is_some() { &tapis.base_url } else { "not configured (set TAPIS_CLIENT_ID/SECRET)" }
+        );
+    }
 
     let idp = Arc::new(build_test_idp(&base_url));
     println!(
@@ -101,11 +137,32 @@ async fn main() {
 
     let state = AppState {
         globus: Arc::new(globus),
+        tapis: Arc::new(tapis),
         registry: Arc::new(registry),
         idp: idp.clone(),
         base_url: base_url.clone(),
         sessions: Arc::default(),
     };
+    // When Tapis's registered callback is not /login/callback (e.g. the shared
+    // TMS-prototyping client's http://127.0.0.1:8000/oauth-callback), serve it
+    // too and relay to /login/callback, where the state cookie lives. A
+    // different origin gets its own listener.
+    let mut relay_router = None;
+    if let Some(cb) = &tapis_relay {
+        let router = Router::new().route(cb.path(), get(tapis_callback_relay)).with_state(state.clone());
+        let base = url::Url::parse(&base_url).expect("BASE_URL must be a valid URL");
+        if cb.origin() == base.origin() {
+            relay_router = Some(router);
+        } else {
+            let addr = format!("{}:{}", cb.host_str().unwrap_or("127.0.0.1"), cb.port_or_known_default().unwrap_or(80));
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .unwrap_or_else(|e| panic!("bind {addr} for TAPIS_CALLBACK_URL: {e}"));
+            println!("Relaying Tapis callbacks from {cb}");
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        }
+    }
+
     let app = Router::new()
         .route("/", get(landing))
         .route("/demo", get(index))
@@ -114,11 +171,13 @@ async fn main() {
         .route("/login/callback", get(callback))
         .route("/login/status", get(login_status))
         .route("/logout", post(logout))
+        .route("/logout/idp", get(logout_idp))
         .route("/mock-globus/authorize", get(mock_authorize))
         .route("/mock-globus/approve", get(mock_approve))
         .route("/mock-globus/idp-callback", get(mock_idp_callback))
         .merge(test_idp::router(idp))
-        .with_state(state);
+        .with_state(state)
+        .merge(relay_router.unwrap_or_default());
 
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     println!("Listening on {base_url}");
@@ -168,8 +227,9 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn list_institutions(State(app): State<AppState>) -> Response {
-    let list = app.registry.approved();
-    tapis_style(StatusCode::OK, "Approved institutions.", json!(list))
+    // Unapproved entries are listed so the page can show them disabled;
+    // /login still refuses them.
+    tapis_style(StatusCode::OK, "Institutions.", json!(app.registry.all()))
 }
 
 #[derive(Deserialize)]
@@ -184,17 +244,46 @@ async fn login(
     jar: CookieJar,
     Query(p): Query<LoginParams>,
 ) -> Response {
-    let Some(inst) = app.registry.find_approved(&p.institution) else {
+    let Some(inst) = app.registry.find(&p.institution) else {
         return tapis_style(
             StatusCode::FORBIDDEN,
-            &format!("Institution '{}' is not on the approved list.", p.institution),
+            &format!("Institution '{}' is not known.", p.institution),
             json!(null),
         );
     };
 
+    // Unapproved institutions never reach Globus or Tapis: no redirect, no
+    // state cookie, just the reason.
+    if !inst.approved {
+        if p.dry_run {
+            return tapis_style(
+                StatusCode::FORBIDDEN,
+                &format!("Institution '{}' is not on the approved list; login is blocked.", inst.id),
+                json!(null),
+            );
+        }
+        return (StatusCode::FORBIDDEN, Html(page_filtered(inst))).into_response();
+    }
+
     // State binds this browser's login attempt to the institution it picked.
     let nonce = uuid::Uuid::new_v4().to_string();
-    let url = globus::build_authorize_url(&app.globus, &nonce, &inst.redirect_idp_domain);
+    let url = match inst.provider {
+        Provider::Globus => {
+            globus::build_authorize_url(&app.globus, &nonce, inst.redirect_idp_domain.as_deref())
+        }
+        // The offline mock stands in for Tapis as well as Globus.
+        Provider::TaccTapis if app.globus.is_mock() => globus::build_authorize_url(&app.globus, &nonce, None),
+        Provider::TaccTapis => match tapis::build_authorize_url(&app.tapis, &nonce) {
+            Some(url) => url,
+            None => {
+                return tapis_style(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "TaccTapis login is not configured: set TAPIS_CLIENT_ID and TAPIS_CLIENT_SECRET.",
+                    json!(null),
+                )
+            }
+        },
+    };
 
     if p.dry_run {
         return tapis_style(
@@ -211,7 +300,7 @@ async fn login(
     let cookie = Cookie::build((STATE_COOKIE, format!("{nonce}|{}", inst.id)))
         .path("/")
         .http_only(true)
-        .same_site(SameSite::Lax); // Lax so the top-level redirect back from Globus carries it
+        .same_site(SameSite::Lax); // Lax so the top-level redirect back from Globus/Tapis carries it
     (jar.add(cookie), Redirect::temporary(url.as_str())).into_response()
 }
 
@@ -230,7 +319,7 @@ async fn callback(
     let jar_cleared = jar.clone().remove(Cookie::build(STATE_COOKIE).path("/"));
 
     if let Some(err) = p.error {
-        return (jar_cleared, page_error(StatusCode::BAD_REQUEST, &format!("Globus returned error: {err}")))
+        return (jar_cleared, page_error(StatusCode::BAD_REQUEST, &format!("Login provider returned error: {err}")))
             .into_response();
     }
     let (Some(code), Some(state)) = (p.code, p.state) else {
@@ -244,15 +333,19 @@ async fn callback(
     if nonce != state {
         return (jar_cleared, page_error(StatusCode::UNAUTHORIZED, "State mismatch.")).into_response();
     }
-    let Some(inst) = app.registry.find_approved(&inst_id).cloned() else {
-        return (jar_cleared, page_error(StatusCode::FORBIDDEN, "Institution is no longer approved."))
+    let Some(inst) = app.registry.find(&inst_id).cloned() else {
+        return (jar_cleared, page_error(StatusCode::FORBIDDEN, "Institution is no longer known."))
             .into_response();
     };
 
     let user = if app.globus.is_mock() {
         globus::mock_user_from_code(&code).map(|u| (u, None))
     } else {
-        globus::fetch_user(&app.globus, &code).await.map(|(u, t)| (u, Some(t)))
+        match inst.provider {
+            Provider::Globus => globus::fetch_user(&app.globus, &code).await,
+            Provider::TaccTapis => tapis::fetch_user(&app.tapis, &code).await,
+        }
+        .map(|(u, t)| (u, Some(t)))
     };
     let (user, token) = match user {
         Ok(u) => u,
@@ -260,49 +353,129 @@ async fn callback(
     };
 
     // Keep the token even when the identity is rejected: it is still a live
-    // Globus credential, and logout should revoke it.
+    // credential, and logout should revoke it.
     let session = uuid::Uuid::new_v4().to_string();
-    app.sessions.lock().unwrap().insert(session.clone(), token);
+    app.sessions.lock().unwrap().insert(session.clone(), Session { institution: inst.id.clone(), provider: inst.provider, token });
     let jar = jar_cleared.add(
         Cookie::build((SESSION_COOKIE, session)).path("/").http_only(true).same_site(SameSite::Lax),
     );
 
-    let ok = identity_matches(&inst, &user.preferred_username);
-    let status = if ok { StatusCode::OK } else { StatusCode::FORBIDDEN };
-    (jar, (status, Html(page_result(&inst, &user, ok)))).into_response()
+    // The approved list is enforced here, after sign-in, so a blocked
+    // institution still shows who signed in and why they were filtered.
+    let verdict = if !inst.approved {
+        Verdict::Filtered
+    } else if identity_matches(&inst, &user.preferred_username) {
+        Verdict::Welcome
+    } else {
+        Verdict::NotAllowed
+    };
+    let status = if verdict == Verdict::Welcome { StatusCode::OK } else { StatusCode::FORBIDDEN };
+    (jar, (status, Html(page_result(&inst, &user, verdict)))).into_response()
 }
 
-/// Whether this browser completed a Globus login through the app and has not
-/// logged out since. The app cannot see the auth.globus.org session itself.
+/// Hand Tapis's `code`/`state` (or `error`) to the normal callback on BASE_URL.
+async fn tapis_callback_relay(State(app): State<AppState>, RawQuery(query): RawQuery) -> Redirect {
+    Redirect::to(&format!("{}/login/callback?{}", app.base_url, query.unwrap_or_default()))
+}
+
+/// Whether this browser completed a login through the app and has not logged
+/// out since. The app cannot see the auth.globus.org or Tapis session itself.
 async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
-    let logged_in = jar
+    let session = jar
         .get(SESSION_COOKIE)
-        .is_some_and(|c| app.sessions.lock().unwrap().contains_key(c.value()));
-    tapis_style(StatusCode::OK, "Login status.", json!({ "logged_in": logged_in }))
+        .and_then(|c| app.sessions.lock().unwrap().get(c.value()).map(|s| (s.institution.clone(), s.provider)));
+    // The provider's own sign-out page, which the page opens in a new tab. The
+    // mock has no real Globus or Tapis session to sign out of.
+    let logout_url = match &session {
+        _ if app.globus.is_mock() => None,
+        Some((inst, Provider::Globus)) => Some(globus_logout_url(&app, inst)),
+        Some((_, Provider::TaccTapis)) => Some(tapis::logout_url(&app.tapis)),
+        None => None,
+    };
+    let (institution, provider) = session.unzip();
+    tapis_style(
+        StatusCode::OK,
+        "Login status.",
+        json!({
+            "logged_in": institution.is_some(),
+            "institution": institution,
+            "provider": provider,
+            "logout_url": logout_url,
+        }),
+    )
 }
 
-async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {
-    let token = jar
+/// Globus's sign-out page. For an institution with an IdP sign-out URL, its
+/// "Continue" link goes on to /logout/idp, so the institution's session ends
+/// too and the next login is a complete one; otherwise it returns to the
+/// landing page.
+fn globus_logout_url(app: &AppState, institution: &str) -> String {
+    let url = match app.registry.find(institution) {
+        Some(inst) if inst.idp_logout_url.is_some() => globus::logout_url(
+            &app.globus,
+            &format!("{}/logout/idp?institution={}", app.base_url, url_encode(&inst.id)),
+            &format!("{} sign-out", inst.name),
+        ),
+        _ => globus::logout_url(&app.globus, &format!("{}/", app.base_url), "IdP redirect demo"),
+    };
+    url.to_string()
+}
+
+fn url_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+#[derive(Deserialize)]
+struct LogoutIdpParams {
+    institution: String,
+}
+
+/// Second hop of an institution logout. Only redirects to a URL from the
+/// institutions list, so it cannot be used as an open redirect.
+async fn logout_idp(State(app): State<AppState>, Query(p): Query<LogoutIdpParams>) -> Redirect {
+    match app.registry.find(&p.institution).and_then(|i| i.idp_logout_url.as_deref()) {
+        Some(url) => Redirect::to(url),
+        None => Redirect::to("/"),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogoutParams {
+    /// Revoke and clear cookies only, for the page's in-place logout buttons.
+    #[serde(default)]
+    local: bool,
+}
+
+async fn logout(State(app): State<AppState>, jar: CookieJar, Query(p): Query<LogoutParams>) -> Response {
+    let session = jar
         .get(SESSION_COOKIE)
-        .and_then(|c| app.sessions.lock().unwrap().remove(c.value()))
-        .flatten();
-    if let Some(token) = token {
-        if let Err(e) = globus::revoke_token(&app.globus, &token).await {
+        .and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
+    let provider = session.as_ref().map(|s| s.provider);
+    let institution = session.as_ref().map(|s| s.institution.clone()).unwrap_or_default();
+    if let Some(Session { provider, token: Some(token), .. }) = session {
+        let revoked = match provider {
+            Provider::Globus => globus::revoke_token(&app.globus, &token).await,
+            Provider::TaccTapis => tapis::revoke_token(&app.tapis, &token).await,
+        };
+        if let Err(e) = revoked {
             eprintln!("[logout] {e}");
         }
     }
     let jar = jar
         .remove(Cookie::build(SESSION_COOKIE).path("/"))
         .remove(Cookie::build(STATE_COOKIE).path("/"));
+    if p.local {
+        return (jar, StatusCode::NO_CONTENT).into_response();
+    }
 
     // The browser's auth.globus.org session is what lets a later login skip
     // the IdP redirect, so end it there too. Globus's sign-out page does not
-    // redirect by itself; it links back to the landing page.
-    if app.globus.is_mock() {
+    // redirect by itself; it links back to the landing page. Tapis's logout
+    // page has no way back to the app, so a Tapis logout stops at revoking.
+    if app.globus.is_mock() || provider == Some(Provider::TaccTapis) {
         return (jar, Redirect::to("/")).into_response();
     }
-    let url = globus::logout_url(&app.globus, &format!("{}/", app.base_url));
-    (jar, Redirect::to(url.as_str())).into_response()
+    (jar, Redirect::to(&globus_logout_url(&app, &institution))).into_response()
 }
 
 // ---- mock Globus --------------------------------------------------------
@@ -339,6 +512,12 @@ async fn mock_authorize(State(app): State<AppState>, Query(p): Query<MockAuthori
         return Redirect::to(url.as_str()).into_response();
     }
 
+    // No domain: the default Globus login (organization picker) or Tapis.
+    let (place, user_domain) = if domain.is_empty() {
+        ("the organization you pick", "globusid.org")
+    } else {
+        (domain.as_str(), domain.as_str())
+    };
     let row = |k: &str, v: &str| format!("<tr><th>{}</th><td><code>{}</code></td></tr>", esc(k), esc(v));
     let body = format!(
         r#"<h1>Mock Globus Auth</h1>
@@ -359,11 +538,11 @@ directly on the <b>{}</b> identity provider.</p>
         row("client_id", p.client_id.as_deref().unwrap_or("")),
         row("scope", p.scope.as_deref().unwrap_or("")),
         row("redirect_uri", &p.redirect_uri),
-        esc(&domain),
-        esc(&domain),
+        esc(place),
+        esc(place),
         esc(&p.redirect_uri),
         esc(&p.state),
-        esc(&domain),
+        esc(user_domain),
     );
     Html(shell("Mock Globus Auth", &body)).into_response()
 }
@@ -448,29 +627,71 @@ fn shell(title: &str, body: &str) -> String {
  table{{border-collapse:collapse;margin:1rem 0}} th,td{{text-align:left;padding:.3rem .8rem;border-bottom:1px solid #ddd}}
  code{{background:#f2f3f5;padding:.1rem .3rem;border-radius:3px}} .note{{color:#5b6475}}
  .ok{{color:#13703a}} .bad{{color:#a12121}} button{{font:inherit;padding:.4rem 1rem}} input{{font:inherit}}
-</style></head><body>{}<p><a href="/demo">&larr; back to start</a></p></body></html>"#,
+ a.btn{{display:inline-block;background:#1f5fbf;color:#fff;padding:.35rem .9rem;border-radius:4px;text-decoration:none}}
+</style></head><body>{}<p><a class="btn" href="/demo">&larr; Back to start</a></p></body></html>"#,
         esc(title),
         body
     )
 }
 
-const LOGOUT_FORM: &str =
-    r#"<form action="/logout" method="post"><button>Log out of Globus</button></form>"#;
-
 fn page_error(status: StatusCode, msg: &str) -> (StatusCode, Html<String>) {
     (status, Html(shell("Login error", &format!("<h1 class=\"bad\">Login failed</h1><p>{}</p>", esc(msg)))))
 }
 
-fn page_result(inst: &Institution, u: &globus::UserInfo, ok: bool) -> String {
-    let verdict = if ok {
-        format!("<h1 class=\"ok\">&#10003; Welcome</h1><p>Your identity belongs to <b>{}</b>, an approved institution.</p>", esc(&inst.name))
-    } else {
-        format!(
+/// Shown by /login instead of redirecting when the chosen institution is not
+/// approved. Mirrors the Welcome page, with the institution's details in
+/// place of an identity, since no sign-in happens.
+fn page_filtered(inst: &Institution) -> String {
+    let row = |k: &str, v: &str| format!("<tr><th>{}</th><td>{}</td></tr>", k, esc(v));
+    let provider = match inst.provider {
+        Provider::Globus => "Globus Auth",
+        Provider::TaccTapis => "Tapis OAuth2",
+    };
+    let body = format!(
+        "<h1 class=\"bad\">&#8856; Filtered</h1>\
+         <p><b>{}</b> is not on the approved institutions list (<code>\"approved\": false</code>), \
+         so login with it is blocked. You were not sent to {provider}, and no sign-in took place.</p>\
+         <p class=\"note\">The approved list decides which institutions may use the service. The server \
+         checks it before starting the OAuth flow, so editing the page or the URL cannot get around it.</p>\
+         <table>{}{}{}{}{}</table>",
+        esc(&inst.name),
+        row("institution", &inst.name),
+        row("id", &inst.id),
+        row("redirect_idp_domain", inst.redirect_idp_domain.as_deref().unwrap_or("—")),
+        row("provider", provider),
+        row("approved", "false"),
+    );
+    shell("Login filtered", &body)
+}
+
+#[derive(PartialEq, Eq)]
+enum Verdict {
+    Welcome,
+    /// Signed in with an identity outside the chosen institution's domain.
+    NotAllowed,
+    /// Signed in, but the institution is not on the approved list.
+    Filtered,
+}
+
+fn page_result(inst: &Institution, u: &globus::UserInfo, verdict: Verdict) -> String {
+    let verdict = match verdict {
+        Verdict::Welcome => format!(
+            "<h1 class=\"ok\">&#10003; Welcome</h1><p>Your identity belongs to <b>{}</b>, an approved institution.</p>",
+            esc(&inst.name)
+        ),
+        // Only when the list changed between /login and the callback; /login
+        // normally stops unapproved institutions before sign-in.
+        Verdict::Filtered => format!(
+            "<h1 class=\"bad\">&#8856; Filtered</h1><p>You signed in, but <b>{}</b> is not on the \
+             approved institutions list (<code>\"approved\": false</code>), so this login is blocked.</p>",
+            esc(&inst.name)
+        ),
+        Verdict::NotAllowed => format!(
             "<h1 class=\"bad\">&#10007; Not allowed</h1><p>You chose <b>{}</b> but came back as an identity outside <code>@{}</code>. \
              <code>redirect_idp_domain</code> only steers the login page, so the server enforces the match here.</p>",
             esc(&inst.name),
-            esc(&inst.redirect_idp_domain)
-        )
+            esc(inst.redirect_idp_domain.as_deref().unwrap_or_default())
+        ),
     };
     let row = |k: &str, v: &Option<String>| {
         format!("<tr><th>{}</th><td>{}</td></tr>", k, esc(v.as_deref().unwrap_or("—")))
@@ -484,5 +705,5 @@ fn page_result(inst: &Institution, u: &globus::UserInfo, ok: bool) -> String {
         row("identity_provider_display_name", &u.identity_provider_display_name),
         row("sub", &Some(u.sub.clone())),
     );
-    shell("Login result", &format!("{body}{LOGOUT_FORM}"))
+    shell("Login result", &body)
 }

@@ -31,22 +31,22 @@ impl GlobusConfig {
     }
 }
 
-pub fn build_authorize_url(cfg: &GlobusConfig, state: &str, redirect_idp_domain: &str) -> Url {
-    Url::parse_with_params(
-        &cfg.authorize_url,
-        [
-            ("response_type", "code"),
-            ("client_id", cfg.client_id()),
-            ("redirect_uri", cfg.callback_url.as_str()),
-            ("scope", SCOPES),
-            ("state", state),
-            // Users not yet authenticated go straight to this domain's IdP,
-            // bypassing the Globus login page. Replaces the documented
-            // `idp_redirect_domain`, which Globus does not act on.
-            ("redirect_idp_domain", redirect_idp_domain),
-        ],
-    )
-    .expect("authorize_url must be a valid URL")
+/// `redirect_idp_domain: None` gives Globus's default login (the organization picker).
+pub fn build_authorize_url(cfg: &GlobusConfig, state: &str, redirect_idp_domain: Option<&str>) -> Url {
+    let mut params = vec![
+        ("response_type", "code"),
+        ("client_id", cfg.client_id()),
+        ("redirect_uri", cfg.callback_url.as_str()),
+        ("scope", SCOPES),
+        ("state", state),
+    ];
+    if let Some(domain) = redirect_idp_domain {
+        // Users not yet authenticated go straight to this domain's IdP,
+        // bypassing the Globus login page. Replaces the documented
+        // `idp_redirect_domain`, which Globus does not act on.
+        params.push(("redirect_idp_domain", domain));
+    }
+    Url::parse_with_params(&cfg.authorize_url, params).expect("authorize_url must be a valid URL")
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,14 +123,14 @@ pub async fn revoke_token(cfg: &GlobusConfig, token: &str) -> Result<(), String>
 }
 
 /// Globus's sign-out page, which ends the browser's auth.globus.org session
-/// and offers a link back to `return_to`.
-pub fn logout_url(cfg: &GlobusConfig, return_to: &str) -> Url {
+/// and offers a "Continue to `return_name`" link to `return_to`.
+pub fn logout_url(cfg: &GlobusConfig, return_to: &str, return_name: &str) -> Url {
     Url::parse_with_params(
         GLOBUS_LOGOUT_URL,
         [
             ("client_id", cfg.client_id()),
             ("redirect_uri", return_to),
-            ("redirect_name", "IdP redirect demo"),
+            ("redirect_name", return_name),
         ],
     )
     .expect("logout URL is valid")
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn authorize_url_carries_redirect_idp_domain() {
-        let url = build_authorize_url(&cfg(), "s123", "uchicago.edu");
+        let url = build_authorize_url(&cfg(), "s123", Some("uchicago.edu"));
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(url.host_str(), Some("auth.globus.org"));
         assert_eq!(q["redirect_idp_domain"], "uchicago.edu");
@@ -183,8 +183,14 @@ mod tests {
     }
 
     #[test]
+    fn default_login_has_no_redirect_idp_domain() {
+        let url = build_authorize_url(&cfg(), "s123", None);
+        assert!(url.query_pairs().all(|(k, _)| k != "redirect_idp_domain"));
+    }
+
+    #[test]
     fn logout_url_returns_to_the_app() {
-        let url = logout_url(&cfg(), "http://localhost:8080/");
+        let url = logout_url(&cfg(), "http://localhost:8080/", "IdP redirect demo");
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(url.as_str().split('?').next(), Some(GLOBUS_LOGOUT_URL));
         assert_eq!(q["client_id"], "abc");

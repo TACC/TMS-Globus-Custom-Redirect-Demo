@@ -15,11 +15,15 @@ addition being `redirect_idp_domain`.
 
 ## What it shows
 
-1. `GET /login/institutions` serves only the `approved: true` entries from
-   `mock/approved_institutions.json` (Tapis-style envelope:
-   `status / message / version / result`).
-2. `GET /login?institution=tacc` looks the id up in that approved list
-   (unknown or unapproved ids get a 403), then redirects to:
+1. `GET /login/institutions` serves every entry of
+   `mock/approved_institutions.json` with its `approved` flag (Tapis-style
+   envelope: `status / message / version / result`). The page shows
+   `approved: false` entries greyed out with a "not approved" tag. Their
+   **Log in** does not start a login: `/login` answers with a **Filtered**
+   page (laid out like **Welcome**, with the institution's details) explaining
+   that it is not on the approved list, and never redirects to Globus or Tapis.
+2. `GET /login?institution=tacc` looks the id up in that list (unknown ids
+   get a 403, unapproved ones the **Filtered** page), then redirects to:
 
    ```
    https://auth.globus.org/v2/oauth2/authorize
@@ -40,6 +44,53 @@ addition being `redirect_idp_domain`.
 
 Add `&dry_run=true` to `/login` to get the authorize URL as JSON instead of
 being redirected.
+
+Two entries in the mock list are not institution redirects:
+
+- **Globus (default login, no redirect)** (`id: globus`, `redirect_idp_domain: null`)
+  sends the authorize request without `redirect_idp_domain`, so you see
+  Globus's normal organization picker. Any identity is accepted on return.
+- **TACC via Tapis (TaccTapis)** (`id: tacc_tapis`, `provider: tacc_tapis`)
+  logs in directly against Tapis OAuth2 at `tacc.tapis.io`, not through
+  Globus, like `tms_portal`'s `TaccTapis` provider: `/v3/oauth2/authorize`,
+  then a form post to `/v3/oauth2/tokens` with HTTP Basic client credentials.
+  The identity (`sub`, e.g. `jdoe@tacc`) is read from the access token's
+  claims. It needs a Tapis OAuth2 client; set `TAPIS_CLIENT_ID` /
+  `TAPIS_CLIENT_SECRET`. Without them the entry returns a 503 and the rest of
+  the demo still works. Tapis only accepts the client's registered callback
+  URL, so set `TAPIS_CALLBACK_URL` to it if it is not
+  `<BASE_URL>/login/callback`: the demo then also serves that URL (on its own
+  listener if the host or port differs) and relays the response to
+  `/login/callback`.
+  The run scripts read these from the TMS-prototyping dev client in
+  `../../TMS-prototyping/dev.env` (`TAPIS_TENANT_URL`,
+  `TAPIS_OAUTH_CLIENT_ID`, `TAPIS_OAUTH_CLIENT_KEY`,
+  `TAPIS_OAUTH_CALLBACK_URL`; override the path with `TAPIS_ENV_FILE`). That
+  client is on the `portals.tapis.io` tenant with callback
+  `http://127.0.0.1:8000/oauth-callback`, so port 8000 must be free.
+
+After a login, the **Log in** button of the entry you used becomes a red
+**Log out**. Clicking it opens that provider's sign-out page in a new tab
+(Globus's `/v2/web/logout`, or Tapis's `/v3/oauth2/logout`, where you
+confirm), since both otherwise remember you: Globus then skips the
+`redirect_idp_domain` redirect, and Tapis skips its login form. It also
+revokes the token, ends the demo's session (`POST /logout?local=true`), and
+turns back into **Log in**. In mock mode no tab opens.
+
+For institution entries, ending the Globus session is not enough: the
+institution's own IdP still has a session and signs you straight back in.
+Globus does not pass `prompt=login` (or `max_age`) on to CILogon, and no
+`ForceAuthn` reaches the IdP's SAML request, so the app cannot force a
+password prompt from the authorize request. Instead each entry can name its
+IdP's sign-out URL as `idp_logout_url` in `mock/approved_institutions.json`.
+Globus's sign-out page then shows **Continue to <institution> sign-out**, which
+goes to `/logout/idp?institution=<id>` and on to that URL (only URLs from
+the approved list are used). Configured: UT Austin (Shibboleth
+`/idp/profile/Logout`), UChicago (Okta `/login/signout`), Illinois
+(Microsoft `/common/oauth2/v2.0/logout`). UChicago and Illinois sit behind a
+Shibboleth proxy (`shibboleth2.uchicago.edu`, `shibboleth.illinois.edu`)
+whose own session is not ended by this, so the IdP may still sign you in
+silently while the proxy's session lasts.
 
 ## The test IdP (`src/test_idp.rs`)
 
@@ -173,7 +224,11 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
 | `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
 | `GLOBUS_CLIENT_ID`      | required unless `GLOBUS_MOCK=true`                 |
 | `GLOBUS_CLIENT_SECRET`  | required unless `GLOBUS_MOCK=true`                 |
-| `GLOBUS_MOCK`           | unset → real Globus Auth; `true` → built-in mock   |
+| `GLOBUS_MOCK`           | unset → real Globus Auth; `true` → built-in mock (also stands in for Tapis) |
+| `TAPIS_CLIENT_ID`       | unset → TaccTapis entry disabled                   |
+| `TAPIS_CLIENT_SECRET`   | unset → TaccTapis entry disabled                   |
+| `TAPIS_BASE_URL`        | `https://tacc.tapis.io`                            |
+| `TAPIS_CALLBACK_URL`    | `<BASE_URL>/login/callback`                        |
 | `IDP_DOMAIN`            | `tacc.utexas.edu`                                  |
 | `IDP_CLIENT_ID`         | `globus-auth-client`                               |
 | `IDP_CLIENT_SECRET`     | random per run (printed at startup)                |
@@ -205,7 +260,7 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 cargo test
 ```
 
-Covers: unapproved institutions are filtered out, the authorize URL carries
+Covers: only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike
 domains such as `evil-uchicago.edu`), and for the test IdP: JWT signatures
 verify only against its own JWKS, codes are single-use and bound to
