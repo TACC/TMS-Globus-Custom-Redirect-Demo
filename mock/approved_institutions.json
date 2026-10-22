@@ -32,6 +32,20 @@
       "approved": false
     },
     {
+      "id": "sdsc",
+      "name": "San Diego Supercomputer Center",
+      "redirect_idp_domain": "ucsd.edu",
+      "idp_logout_url": "https://a5.ucsd.edu/tritON/profile/Logout",
+      "approved": true
+    },
+    {
+      "id": "stanford",
+      "name": "Stanford University",
+      "redirect_idp_domain": "stanford.edu",
+      "idp_logout_url": "https://login.stanford.edu/idp/profile/Logout",
+      "approved": true
+    },
+    {
       "id": "tacc_tapis",
       "name": "Tapis OAuth2 (TaccTapis)",
       "provider": "tacc_tapis",

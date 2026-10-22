@@ -87,7 +87,11 @@ Globus's sign-out page then shows **Continue to <institution> sign-out**, which
 goes to `/logout/idp?institution=<id>` and on to that URL (only URLs from
 the approved list are used). Configured: UT Austin (Shibboleth
 `/idp/profile/Logout`), UChicago (Okta `/login/signout`), Illinois
-(Microsoft `/common/oauth2/v2.0/logout`). UChicago and Illinois sit behind a
+(Microsoft `/common/oauth2/v2.0/logout`), SDSC (UCSD Shibboleth
+`a5.ucsd.edu/tritON/profile/Logout`), Stanford (Shibboleth
+`/idp/profile/Logout`). SDSC has no IdP of its own in Globus (`sdsc.edu`
+stops at the organization picker), so its entry uses UC San Diego's
+`ucsd.edu`, and SDSC users come back as `@ucsd.edu` identities. UChicago and Illinois sit behind a
 Shibboleth proxy (`shibboleth2.uchicago.edu`, `shibboleth.illinois.edu`)
 whose own session is not ended by this, so the IdP may still sign you in
 silently while the proxy's session lasts.
