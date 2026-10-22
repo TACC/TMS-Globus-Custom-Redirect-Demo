@@ -7,7 +7,8 @@
 //!   GET /login/institutions     approved institutions (from the mocked JSON)
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it)
 //!   GET /login/callback         code -> userinfo -> institution check
-//!   GET /mock-globus/authorize  stand-in for auth.globus.org when no client is configured
+//!   POST /logout                revoke the Globus token, clear cookies, end the Globus session
+//!   GET /mock-globus/authorize  stand-in for auth.globus.org when GLOBUS_MOCK=true
 //!   GET /mock-globus/approve    mock "user authenticated" step
 //!   GET /mock-globus/idp-callback  mock Globus acting as the test IdP's client
 //!   /idp/...                    test OIDC provider (see test_idp.rs)
@@ -20,7 +21,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -29,10 +30,12 @@ use globus::GlobusConfig;
 use institutions::{identity_matches, Institution, Registry};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use test_idp::TestIdp;
 
 const STATE_COOKIE: &str = "idp_demo_state";
+const SESSION_COOKIE: &str = "idp_demo_session";
 
 #[derive(Clone)]
 struct AppState {
@@ -40,6 +43,8 @@ struct AppState {
     registry: Arc<Registry>,
     idp: Arc<TestIdp>,
     base_url: String,
+    /// Session id -> Globus access token, held server-side so logout can revoke it.
+    sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[tokio::main]
@@ -48,9 +53,21 @@ async fn main() {
     let bind = env_or("BIND_ADDR", "127.0.0.1:8080");
     let inst_file = env_or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
 
-    let client = match (std::env::var("GLOBUS_CLIENT_ID"), std::env::var("GLOBUS_CLIENT_SECRET")) {
-        (Ok(id), Ok(secret)) if !id.is_empty() => Some((id, secret)),
-        _ => None,
+    // Real Globus Auth unless the offline mock is asked for explicitly, so a
+    // missing credential fails loudly instead of quietly serving the mock.
+    let client = if env_or("GLOBUS_MOCK", "").eq_ignore_ascii_case("true") {
+        None
+    } else {
+        match (std::env::var("GLOBUS_CLIENT_ID"), std::env::var("GLOBUS_CLIENT_SECRET")) {
+            (Ok(id), Ok(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => Some((id, secret)),
+            _ => {
+                eprintln!(
+                    "GLOBUS_CLIENT_ID and GLOBUS_CLIENT_SECRET must be set for real Globus Auth \
+                     (or set GLOBUS_MOCK=true to run against the built-in mock)."
+                );
+                std::process::exit(1);
+            }
+        }
     };
     let authorize_url = if client.is_some() {
         globus::GLOBUS_AUTHORIZE_URL.to_string()
@@ -70,7 +87,7 @@ async fn main() {
     );
     println!(
         "Mode: {}",
-        if globus.is_mock() { "MOCK Globus (set GLOBUS_CLIENT_ID/SECRET for real)" } else { "real Globus Auth" }
+        if globus.is_mock() { "MOCK Globus (GLOBUS_MOCK=true)" } else { "real Globus Auth" }
     );
 
     let idp = Arc::new(build_test_idp(&base_url));
@@ -84,12 +101,14 @@ async fn main() {
         registry: Arc::new(registry),
         idp: idp.clone(),
         base_url: base_url.clone(),
+        sessions: Arc::default(),
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/login/institutions", get(list_institutions))
         .route("/login", get(login))
         .route("/login/callback", get(callback))
+        .route("/logout", post(logout))
         .route("/mock-globus/authorize", get(mock_authorize))
         .route("/mock-globus/approve", get(mock_approve))
         .route("/mock-globus/idp-callback", get(mock_idp_callback))
@@ -222,18 +241,50 @@ async fn callback(
     };
 
     let user = if app.globus.is_mock() {
-        globus::mock_user_from_code(&code)
+        globus::mock_user_from_code(&code).map(|u| (u, None))
     } else {
-        globus::fetch_user(&app.globus, &code).await
+        globus::fetch_user(&app.globus, &code).await.map(|(u, t)| (u, Some(t)))
     };
-    let user = match user {
+    let (user, token) = match user {
         Ok(u) => u,
         Err(e) => return (jar_cleared, page_error(StatusCode::BAD_GATEWAY, &e)).into_response(),
     };
 
+    // Keep the token even when the identity is rejected: it is still a live
+    // Globus credential, and logout should revoke it.
+    let session = uuid::Uuid::new_v4().to_string();
+    if let Some(token) = token {
+        app.sessions.lock().unwrap().insert(session.clone(), token);
+    }
+    let jar = jar_cleared.add(
+        Cookie::build((SESSION_COOKIE, session)).path("/").http_only(true).same_site(SameSite::Lax),
+    );
+
     let ok = identity_matches(&inst, &user.preferred_username);
     let status = if ok { StatusCode::OK } else { StatusCode::FORBIDDEN };
-    (jar_cleared, (status, Html(page_result(&inst, &user, ok)))).into_response()
+    (jar, (status, Html(page_result(&inst, &user, ok)))).into_response()
+}
+
+async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {
+    let token = jar
+        .get(SESSION_COOKIE)
+        .and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
+    if let Some(token) = token {
+        if let Err(e) = globus::revoke_token(&app.globus, &token).await {
+            eprintln!("[logout] {e}");
+        }
+    }
+    let jar = jar
+        .remove(Cookie::build(SESSION_COOKIE).path("/"))
+        .remove(Cookie::build(STATE_COOKIE).path("/"));
+
+    // The browser's auth.globus.org session is what lets a later login skip
+    // the IdP redirect, so end it there too.
+    if app.globus.is_mock() {
+        return (jar, Redirect::to("/")).into_response();
+    }
+    let url = globus::logout_url(&app.globus, &format!("{}/", app.base_url));
+    (jar, Redirect::to(url.as_str())).into_response()
 }
 
 // ---- mock Globus --------------------------------------------------------
@@ -385,6 +436,9 @@ fn shell(title: &str, body: &str) -> String {
     )
 }
 
+const LOGOUT_FORM: &str =
+    r#"<form action="/logout" method="post"><button>Log out of Globus</button></form>"#;
+
 fn page_error(status: StatusCode, msg: &str) -> (StatusCode, Html<String>) {
     (status, Html(shell("Login error", &format!("<h1 class=\"bad\">Login failed</h1><p>{}</p>", esc(msg)))))
 }
@@ -412,5 +466,5 @@ fn page_result(inst: &Institution, u: &globus::UserInfo, ok: bool) -> String {
         row("identity_provider_display_name", &u.identity_provider_display_name),
         row("sub", &Some(u.sub.clone())),
     );
-    shell("Login result", &body)
+    shell("Login result", &format!("{body}{LOGOUT_FORM}"))
 }

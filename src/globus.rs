@@ -9,6 +9,8 @@ use url::Url;
 pub const GLOBUS_AUTHORIZE_URL: &str = "https://auth.globus.org/v2/oauth2/authorize";
 pub const GLOBUS_TOKEN_URL: &str = "https://auth.globus.org/v2/oauth2/token";
 pub const GLOBUS_USERINFO_URL: &str = "https://auth.globus.org/v2/oauth2/userinfo";
+pub const GLOBUS_REVOKE_URL: &str = "https://auth.globus.org/v2/oauth2/token/revoke";
+pub const GLOBUS_LOGOUT_URL: &str = "https://auth.globus.org/v2/web/logout";
 pub const SCOPES: &str = "openid profile email";
 
 #[derive(Debug, Clone)]
@@ -63,8 +65,9 @@ pub struct UserInfo {
     pub identity_provider_display_name: Option<String>,
 }
 
-/// Exchange the authorization code and fetch userinfo (real Globus).
-pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<UserInfo, String> {
+/// Exchange the authorization code and fetch userinfo (real Globus). Also
+/// returns the access token so logout can revoke it.
+pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<(UserInfo, String), String> {
     let (client_id, client_secret) = cfg.client.as_ref().ok_or("not configured for Globus")?;
     let http = reqwest::Client::new();
 
@@ -90,8 +93,9 @@ pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<UserInfo, Stri
         .await
         .map_err(|e| format!("bad token response: {e}"))?;
 
-    http.get(GLOBUS_USERINFO_URL)
-        .bearer_auth(token.access_token)
+    let user = http
+        .get(GLOBUS_USERINFO_URL)
+        .bearer_auth(&token.access_token)
         .send()
         .await
         .map_err(|e| format!("userinfo request failed: {e}"))?
@@ -99,7 +103,37 @@ pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<UserInfo, Stri
         .map_err(|e| format!("userinfo rejected: {e}"))?
         .json()
         .await
-        .map_err(|e| format!("bad userinfo response: {e}"))
+        .map_err(|e| format!("bad userinfo response: {e}"))?;
+    Ok((user, token.access_token))
+}
+
+/// Revoke an access token so it stops working before it expires.
+pub async fn revoke_token(cfg: &GlobusConfig, token: &str) -> Result<(), String> {
+    let (client_id, client_secret) = cfg.client.as_ref().ok_or("not configured for Globus")?;
+    reqwest::Client::new()
+        .post(GLOBUS_REVOKE_URL)
+        .basic_auth(client_id.trim(), Some(client_secret.trim()))
+        .form(&[("token", token)])
+        .send()
+        .await
+        .map_err(|e| format!("revoke request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("revoke rejected: {e}"))?;
+    Ok(())
+}
+
+/// Globus's sign-out page, which ends the browser's auth.globus.org session
+/// and offers a link back to `return_to`.
+pub fn logout_url(cfg: &GlobusConfig, return_to: &str) -> Url {
+    Url::parse_with_params(
+        GLOBUS_LOGOUT_URL,
+        [
+            ("client_id", cfg.client_id()),
+            ("redirect_uri", return_to),
+            ("redirect_name", "IdP redirect demo"),
+        ],
+    )
+    .expect("logout URL is valid")
 }
 
 // ---- mock mode ----------------------------------------------------------
@@ -146,6 +180,15 @@ mod tests {
         assert_eq!(q["response_type"], "code");
         assert_eq!(q["state"], "s123");
         assert_eq!(q["redirect_uri"], "http://localhost:8080/login/callback");
+    }
+
+    #[test]
+    fn logout_url_returns_to_the_app() {
+        let url = logout_url(&cfg(), "http://localhost:8080/");
+        let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.as_str().split('?').next(), Some(GLOBUS_LOGOUT_URL));
+        assert_eq!(q["client_id"], "abc");
+        assert_eq!(q["redirect_uri"], "http://localhost:8080/");
     }
 
     #[test]

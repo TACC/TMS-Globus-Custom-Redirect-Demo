@@ -13,6 +13,7 @@
   .note { color: #5b6475; }
   a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
   a.dry { margin-left: .6rem; font-size: .9rem; }
+  form.logout button { font: inherit; padding: .35rem .9rem; }
 </style>
 </head>
 <body>
@@ -21,6 +22,10 @@
   <em>approved</em> entries of <code>mock/approved_institutions.json</code>. Choosing one sends you to
   Globus Auth with <code>redirect_idp_domain</code> set to that institution's domain.</p>
   <ul id="list"><li>Loading…</li></ul>
+  <form class="logout" action="/logout" method="post">
+    <button>Log out of Globus</button>
+    <span class="note">Revokes this app's Globus token, clears its cookies and signs you out of auth.globus.org.</span>
+  </form>
   <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
 <script>
   fetch('/login/institutions')

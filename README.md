@@ -68,14 +68,31 @@ broker to an upstream IdP (Globus itself), its discovery and token responses
 are wrapped in the TMS response envelope, its token endpoint takes JSON rather
 than a form post, and it returns an empty `id_token`.
 
-## Run it offline (no Globus account needed)
+## Run it against real Globus
 
 ```bash
+export GLOBUS_CLIENT_ID=<your Globus app's client id>
+export GLOBUS_CLIENT_SECRET=<its secret>
 cargo run
 # open http://localhost:8080
 ```
 
-With no Globus credentials set, the authorize redirect points at a built-in
+**Log in** sends you to `auth.globus.org` with the institution's
+`redirect_idp_domain`, and on to that institution's real login page (e.g.
+`utexas.edu` → UT EID, `uchicago.edu` → UChicago Okta). Your Globus app must
+list `http://localhost:8080/login/callback` (or `<BASE_URL>/login/callback`)
+as a redirect URI. Use a private window: an existing Globus session is not
+redirected. The app refuses to start without both credentials unless
+`GLOBUS_MOCK=true` is set.
+
+## Run it offline (no Globus account needed)
+
+```bash
+GLOBUS_MOCK=true cargo run
+# open http://localhost:8080
+```
+
+With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
 `/mock-globus/authorize` page.
 
 - **TACC** (`tacc.utexas.edu`, the test IdP's domain): mock Globus does what
@@ -101,7 +118,7 @@ With no Globus credentials set, the authorize redirect points at a built-in
    export BASE_URL=https://idp-test.tacc.utexas.edu
    export BIND_ADDR=127.0.0.1:8080
    export IDP_CLIENT_SECRET=$(openssl rand -hex 32)   # keep it; Globus registers it
-   cargo run --release
+   GLOBUS_MOCK=true cargo run --release                # real credentials come in step 3
    ```
 
    Check `curl $BASE_URL/idp/.well-known/openid-configuration` from outside.
@@ -134,7 +151,8 @@ With no Globus credentials set, the authorize redirect points at a built-in
 3. **Point the demo at real Globus.** Add
    `https://idp-test.tacc.utexas.edu/login/callback` as a redirect URI on
    your Globus app at <https://app.globus.org/settings/developers>, then
-   restart with `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` also set.
+   restart with `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` set and without
+   `GLOBUS_MOCK`.
 
 4. **Run the test** in a private window (an existing Globus session is not
    redirected): open `$BASE_URL`, click **Log in** for TACC.
@@ -153,8 +171,9 @@ With no Globus credentials set, the authorize redirect points at a built-in
 | `BASE_URL`              | `http://localhost:8080`                            |
 | `BIND_ADDR`             | `127.0.0.1:8080`                                   |
 | `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
-| `GLOBUS_CLIENT_ID`      | unset → mock mode                                  |
-| `GLOBUS_CLIENT_SECRET`  | unset → mock mode                                  |
+| `GLOBUS_CLIENT_ID`      | required unless `GLOBUS_MOCK=true`                 |
+| `GLOBUS_CLIENT_SECRET`  | required unless `GLOBUS_MOCK=true`                 |
+| `GLOBUS_MOCK`           | unset → real Globus Auth; `true` → built-in mock   |
 | `IDP_DOMAIN`            | `tacc.utexas.edu`                                  |
 | `IDP_CLIENT_ID`         | `globus-auth-client`                               |
 | `IDP_CLIENT_SECRET`     | random per run (printed at startup)                |
