@@ -3,11 +3,13 @@
 //! returned identity really belongs to that institution.
 //!
 //! Routes (shaped like tms_portal's routes/login.rs):
-//!   GET /                       demo page
+//!   GET /                       landing page (a single Login button to /demo)
+//!   GET /demo                   demo page
 //!   GET /login/institutions     approved institutions (from the mocked JSON)
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it)
 //!   GET /login/callback         code -> userinfo -> institution check
-//!   POST /logout                revoke the Globus token, clear cookies, end the Globus session
+//!   GET /login/status           whether this browser has a Globus login session with the app
+//!   POST /logout                revoke the Globus token, clear cookies, end the Globus session, back to /
 //!   GET /mock-globus/authorize  stand-in for auth.globus.org when GLOBUS_MOCK=true
 //!   GET /mock-globus/approve    mock "user authenticated" step
 //!   GET /mock-globus/idp-callback  mock Globus acting as the test IdP's client
@@ -43,8 +45,9 @@ struct AppState {
     registry: Arc<Registry>,
     idp: Arc<TestIdp>,
     base_url: String,
-    /// Session id -> Globus access token, held server-side so logout can revoke it.
-    sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// Session id -> Globus access token (None in mock mode), held server-side
+    /// so logout can revoke it.
+    sessions: Arc<Mutex<HashMap<String, Option<String>>>>,
 }
 
 #[tokio::main]
@@ -104,10 +107,12 @@ async fn main() {
         sessions: Arc::default(),
     };
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(landing))
+        .route("/demo", get(index))
         .route("/login/institutions", get(list_institutions))
         .route("/login", get(login))
         .route("/login/callback", get(callback))
+        .route("/login/status", get(login_status))
         .route("/logout", post(logout))
         .route("/mock-globus/authorize", get(mock_authorize))
         .route("/mock-globus/approve", get(mock_approve))
@@ -153,6 +158,10 @@ fn tapis_style(status: StatusCode, message: &str, result: serde_json::Value) -> 
 }
 
 // ---- routes -------------------------------------------------------------
+
+async fn landing() -> Html<&'static str> {
+    Html(include_str!("../static/landing.html"))
+}
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
@@ -253,9 +262,7 @@ async fn callback(
     // Keep the token even when the identity is rejected: it is still a live
     // Globus credential, and logout should revoke it.
     let session = uuid::Uuid::new_v4().to_string();
-    if let Some(token) = token {
-        app.sessions.lock().unwrap().insert(session.clone(), token);
-    }
+    app.sessions.lock().unwrap().insert(session.clone(), token);
     let jar = jar_cleared.add(
         Cookie::build((SESSION_COOKIE, session)).path("/").http_only(true).same_site(SameSite::Lax),
     );
@@ -265,10 +272,20 @@ async fn callback(
     (jar, (status, Html(page_result(&inst, &user, ok)))).into_response()
 }
 
+/// Whether this browser completed a Globus login through the app and has not
+/// logged out since. The app cannot see the auth.globus.org session itself.
+async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
+    let logged_in = jar
+        .get(SESSION_COOKIE)
+        .is_some_and(|c| app.sessions.lock().unwrap().contains_key(c.value()));
+    tapis_style(StatusCode::OK, "Login status.", json!({ "logged_in": logged_in }))
+}
+
 async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {
     let token = jar
         .get(SESSION_COOKIE)
-        .and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
+        .and_then(|c| app.sessions.lock().unwrap().remove(c.value()))
+        .flatten();
     if let Some(token) = token {
         if let Err(e) = globus::revoke_token(&app.globus, &token).await {
             eprintln!("[logout] {e}");
@@ -279,7 +296,8 @@ async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {
         .remove(Cookie::build(STATE_COOKIE).path("/"));
 
     // The browser's auth.globus.org session is what lets a later login skip
-    // the IdP redirect, so end it there too.
+    // the IdP redirect, so end it there too. Globus's sign-out page does not
+    // redirect by itself; it links back to the landing page.
     if app.globus.is_mock() {
         return (jar, Redirect::to("/")).into_response();
     }
@@ -430,7 +448,7 @@ fn shell(title: &str, body: &str) -> String {
  table{{border-collapse:collapse;margin:1rem 0}} th,td{{text-align:left;padding:.3rem .8rem;border-bottom:1px solid #ddd}}
  code{{background:#f2f3f5;padding:.1rem .3rem;border-radius:3px}} .note{{color:#5b6475}}
  .ok{{color:#13703a}} .bad{{color:#a12121}} button{{font:inherit;padding:.4rem 1rem}} input{{font:inherit}}
-</style></head><body>{}<p><a href="/">&larr; back to start</a></p></body></html>"#,
+</style></head><body>{}<p><a href="/demo">&larr; back to start</a></p></body></html>"#,
         esc(title),
         body
     )

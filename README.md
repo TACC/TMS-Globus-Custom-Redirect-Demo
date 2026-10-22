@@ -155,7 +155,7 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
    `GLOBUS_MOCK`.
 
 4. **Run the test** in a private window (an existing Globus session is not
-   redirected): open `$BASE_URL`, click **Log in** for TACC.
+   redirected): open `$BASE_URL`, click **Login**, then **Log in** for TACC.
    - Pass: you land directly on the orange "TACC test login" page (its
      `referer` row shows `auth.globus.org`, and the server logs
      `[test-idp] authorize`), sign in, and finish on "Welcome" with
