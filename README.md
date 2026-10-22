@@ -62,11 +62,9 @@ Two entries in the mock list are not institution redirects:
   `<BASE_URL>/login/callback`: the demo then also serves that URL (on its own
   listener if the host or port differs) and relays the response to
   `/login/callback`.
-  The run scripts read these from the TMS-prototyping dev client in
-  `../../TMS-prototyping/dev.env` (`TAPIS_TENANT_URL`,
-  `TAPIS_OAUTH_CLIENT_ID`, `TAPIS_OAUTH_CLIENT_KEY`,
-  `TAPIS_OAUTH_CALLBACK_URL`; override the path with `TAPIS_ENV_FILE`). That
-  client is on the `portals.tapis.io` tenant with callback
+  The local `dev.env` uses the TMS-prototyping dev client (values copied
+  from `../../TMS-prototyping/dev.env`). That client is on the
+  `portals.tapis.io` tenant with callback
   `http://127.0.0.1:8000/oauth-callback`, so port 8000 must be free.
 
 After a login, the **Log in** button of the entry you used becomes a red
@@ -123,12 +121,26 @@ broker to an upstream IdP (Globus itself), its discovery and token responses
 are wrapped in the TMS response envelope, its token endpoint takes JSON rather
 than a form post, and it returns an empty `id_token`.
 
-## Run it against real Globus
+## Settings: `dev.env`
+
+All settings are read from `dev.env` in the working directory: `KEY=VALUE`
+lines, untracked (it holds secrets). Start from the template:
 
 ```bash
-export GLOBUS_CLIENT_ID=<your Globus app's client id>
-export GLOBUS_CLIENT_SECRET=<its secret>
-cargo run
+cp dev.env.example dev.env   # then fill in GLOBUS_CLIENT_ID / GLOBUS_CLIENT_SECRET, etc.
+```
+
+A real environment variable with the same name overrides the file (handy for
+one-offs such as `GLOBUS_MOCK=true cargo run`), empty values use the
+default, and `DEV_ENV_FILE=<path>` (environment only) reads another file.
+See [Configuration](#configuration) for every setting.
+
+## Run it against real Globus
+
+With `GLOBUS_CLIENT_ID` and `GLOBUS_CLIENT_SECRET` in `dev.env`:
+
+```bash
+./run_real_globus.sh     # or: cargo run
 # open http://localhost:8080
 ```
 
@@ -138,7 +150,8 @@ cargo run
 list `http://localhost:8080/login/callback` (or `<BASE_URL>/login/callback`)
 as a redirect URI. Use a private window: an existing Globus session is not
 redirected. The app refuses to start without both credentials unless
-`GLOBUS_MOCK=true` is set.
+`GLOBUS_MOCK=true` is set. `run_real_globus.sh` builds a release binary and
+forces real Globus Auth (`GLOBUS_MOCK=false`), whatever `dev.env` says.
 
 ## Run it offline (no Globus account needed)
 
@@ -169,12 +182,16 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
    domain you can prove, e.g. `https://idp-test.tacc.utexas.edu`, behind a
    TLS-terminating reverse proxy:
 
+   In `dev.env`:
+
    ```bash
-   export BASE_URL=https://idp-test.tacc.utexas.edu
-   export BIND_ADDR=127.0.0.1:8080
-   export IDP_CLIENT_SECRET=$(openssl rand -hex 32)   # keep it; Globus registers it
-   GLOBUS_MOCK=true cargo run --release                # real credentials come in step 3
+   BASE_URL=https://idp-test.tacc.utexas.edu
+   BIND_ADDR=127.0.0.1:8080
+   IDP_CLIENT_SECRET=<openssl rand -hex 32>   # keep it; Globus registers it
+   GLOBUS_MOCK=true                           # real credentials come in step 3
    ```
+
+   then `cargo run --release`.
 
    Check `curl $BASE_URL/idp/.well-known/openid-configuration` from outside.
    `idp_signing_key.pem` is created on first run; keep it, so the JWKS
@@ -206,8 +223,8 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
 3. **Point the demo at real Globus.** Add
    `https://idp-test.tacc.utexas.edu/login/callback` as a redirect URI on
    your Globus app at <https://app.globus.org/settings/developers>, then
-   restart with `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` set and without
-   `GLOBUS_MOCK`.
+   set `GLOBUS_CLIENT_ID` / `GLOBUS_CLIENT_SECRET` in `dev.env`, clear
+   `GLOBUS_MOCK`, and restart.
 
 4. **Run the test** in a private window (an existing Globus session is not
    redirected): open `$BASE_URL`, click **Login**, then **Log in** for TACC.
@@ -221,7 +238,9 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
 
 ## Configuration
 
-| Env var                 | Default                                            |
+Set in `dev.env` (template: `dev.env.example`); environment variables override.
+
+| Setting                 | Default                                            |
 |-------------------------|----------------------------------------------------|
 | `BASE_URL`              | `http://localhost:8080`                            |
 | `BIND_ADDR`             | `127.0.0.1:8080`                                   |

@@ -23,6 +23,7 @@
 
 mod globus;
 mod institutions;
+mod settings;
 mod tapis;
 mod test_idp;
 
@@ -41,6 +42,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use settings::Settings;
 use tapis::TapisConfig;
 use test_idp::TestIdp;
 
@@ -69,17 +71,24 @@ struct Session {
 
 #[tokio::main]
 async fn main() {
-    let base_url = env_or("BASE_URL", "http://localhost:8080");
-    let bind = env_or("BIND_ADDR", "127.0.0.1:8080");
-    let inst_file = env_or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
+    let (env, env_file) = Settings::load().unwrap_or_else(|e| panic!("{e}"));
+    if env.len() == 0 {
+        println!("Settings: no {env_file} (copy dev.env.example); using the environment and defaults");
+    } else {
+        println!("Settings: {} value(s) from {env_file} (environment variables override)", env.len());
+    }
+
+    let base_url = env.or("BASE_URL", "http://localhost:8080");
+    let bind = env.or("BIND_ADDR", "127.0.0.1:8080");
+    let inst_file = env.or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
 
     // Real Globus Auth unless the offline mock is asked for explicitly, so a
     // missing credential fails loudly instead of quietly serving the mock.
-    let client = if env_or("GLOBUS_MOCK", "").eq_ignore_ascii_case("true") {
+    let client = if env.or("GLOBUS_MOCK", "").eq_ignore_ascii_case("true") {
         None
     } else {
-        match (std::env::var("GLOBUS_CLIENT_ID"), std::env::var("GLOBUS_CLIENT_SECRET")) {
-            (Ok(id), Ok(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => Some((id, secret)),
+        match (env.get("GLOBUS_CLIENT_ID"), env.get("GLOBUS_CLIENT_SECRET")) {
+            (Some(id), Some(secret)) => Some((id, secret)),
             _ => {
                 eprintln!(
                     "GLOBUS_CLIENT_ID and GLOBUS_CLIENT_SECRET must be set for real Globus Auth \
@@ -102,13 +111,10 @@ async fn main() {
 
     // TaccTapis is optional: without its credentials only that entry fails.
     let tapis = TapisConfig {
-        client: match (std::env::var("TAPIS_CLIENT_ID"), std::env::var("TAPIS_CLIENT_SECRET")) {
-            (Ok(id), Ok(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => Some((id, secret)),
-            _ => None,
-        },
-        base_url: env_or("TAPIS_BASE_URL", tapis::TAPIS_BASE_URL),
+        client: env.get("TAPIS_CLIENT_ID").zip(env.get("TAPIS_CLIENT_SECRET")),
+        base_url: env.or("TAPIS_BASE_URL", tapis::TAPIS_BASE_URL),
         // Tapis only accepts the callback URL registered for its client.
-        callback_url: env_or("TAPIS_CALLBACK_URL", &globus.callback_url),
+        callback_url: env.or("TAPIS_CALLBACK_URL", &globus.callback_url),
     };
     let tapis_relay = (tapis.callback_url != globus.callback_url)
         .then(|| url::Url::parse(&tapis.callback_url).expect("TAPIS_CALLBACK_URL must be a valid URL"));
@@ -129,7 +135,7 @@ async fn main() {
         );
     }
 
-    let idp = Arc::new(build_test_idp(&base_url));
+    let idp = Arc::new(build_test_idp(&env, &base_url));
     println!(
         "Test IdP: issuer {} (domain {}, client_id {})",
         idp.issuer, idp.domain, idp.client_id
@@ -184,27 +190,23 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn build_test_idp(base_url: &str) -> TestIdp {
-    let key_file = env_or("IDP_SIGNING_KEY", "idp_signing_key.pem");
+fn build_test_idp(env: &Settings, base_url: &str) -> TestIdp {
+    let key_file = env.or("IDP_SIGNING_KEY", "idp_signing_key.pem");
     let key = test_idp::load_or_create_key(&key_file).unwrap_or_else(|e| panic!("{e}"));
-    let client_secret = std::env::var("IDP_CLIENT_SECRET").unwrap_or_else(|_| {
+    let client_secret = env.get("IDP_CLIENT_SECRET").unwrap_or_else(|| {
         let s = uuid::Uuid::new_v4().simple().to_string();
         println!("IDP_CLIENT_SECRET not set; generated one for this run: {s}");
         s
     });
-    let redirect_uris = env_or("IDP_REDIRECT_URIS", test_idp::GLOBUS_IDP_CALLBACK)
+    let redirect_uris = env.or("IDP_REDIRECT_URIS", test_idp::GLOBUS_IDP_CALLBACK)
         .split(',')
         .map(|u| u.trim().to_string())
         .chain([format!("{base_url}/mock-globus/idp-callback")])
         .collect();
     TestIdp::new(
         format!("{base_url}/idp"),
-        env_or("IDP_DOMAIN", "tacc.utexas.edu"),
-        env_or("IDP_CLIENT_ID", "globus-auth-client"),
+        env.or("IDP_DOMAIN", "tacc.utexas.edu"),
+        env.or("IDP_CLIENT_ID", "globus-auth-client"),
         client_secret,
         redirect_uris,
         key,
