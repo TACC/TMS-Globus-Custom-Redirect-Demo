@@ -14,6 +14,8 @@
   code { background: #f2f3f5; padding: .1rem .3rem; border-radius: 3px; }
   .note { color: #5b6475; }
   a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
+  a.btn.home { position: absolute; top: 1rem; right: 1rem; }
+  h1 { margin-right: 10rem; } /* keep the heading clear of the Back to Home button on narrow screens */
   a.btn.signout { background: #c62828; }
   li.unapproved b, li.unapproved code { color: #6b7280; }
   .tag { font-size: .8rem; color: #6b7280; border: 1px solid #ccd; border-radius: 3px; padding: 0 .3rem; margin-left: .3rem; white-space: nowrap; }
@@ -27,6 +29,7 @@
 </style>
 </head>
 <body>
+  <a class="btn home" href="/">&larr; Back to Home</a>
   <h1>Log in with your institution</h1>
   <p class="note">The list below comes from <code>GET /login/institutions</code>, which serves the entries of
   <code>mock/approved_institutions.json</code>; those not <em>approved</em> are greyed out, and their

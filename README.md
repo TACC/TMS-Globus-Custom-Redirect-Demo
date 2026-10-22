@@ -89,7 +89,11 @@ the approved list are used). Configured: UT Austin (Shibboleth
 `a5.ucsd.edu/tritON/profile/Logout`), Stanford (Shibboleth
 `/idp/profile/Logout`). SDSC has no IdP of its own in Globus (`sdsc.edu`
 stops at the organization picker), so its entry uses UC San Diego's
-`ucsd.edu`, and SDSC users come back as `@ucsd.edu` identities. UChicago and Illinois sit behind a
+`ucsd.edu`, and SDSC users come back as `@ucsd.edu` identities. USC
+(Shibboleth `shibboleth.usc.edu/idp/profile/Logout`) and MIT (Okta
+`okta.mit.edu/login/signout`, behind the Touchstone proxy `idp.mit.edu`)
+are listed but not approved: their Globus details are real, but **Log in**
+shows the **Filtered** page. UChicago and Illinois sit behind a
 Shibboleth proxy (`shibboleth2.uchicago.edu`, `shibboleth.illinois.edu`)
 whose own session is not ended by this, so the IdP may still sign you in
 silently while the proxy's session lasts.

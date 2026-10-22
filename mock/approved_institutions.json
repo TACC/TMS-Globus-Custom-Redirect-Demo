@@ -53,6 +53,20 @@
       "approved": true
     },
     {
+      "id": "usc",
+      "name": "University of Southern California",
+      "redirect_idp_domain": "usc.edu",
+      "idp_logout_url": "https://shibboleth.usc.edu/idp/profile/Logout",
+      "approved": false
+    },
+    {
+      "id": "mit",
+      "name": "Massachusetts Institute of Technology",
+      "redirect_idp_domain": "mit.edu",
+      "idp_logout_url": "https://okta.mit.edu/login/signout",
+      "approved": false
+    },
+    {
       "id": "example",
       "name": "Example University (pending review)",
       "redirect_idp_domain": "example.edu",
