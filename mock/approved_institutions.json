@@ -28,7 +28,7 @@
       "id": "illinois",
       "name": "University of Illinois Urbana-Champaign",
       "redirect_idp_domain": "illinois.edu",
-      "idp_logout_url": "https://login.microsoftonline.com/common/oauth2/v2.0/logout",
+      "idp_logout_url": "https://shibboleth.illinois.edu/idp/profile/Logout",
       "approved": false
     },
     {

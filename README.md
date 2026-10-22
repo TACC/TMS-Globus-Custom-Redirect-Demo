@@ -83,20 +83,29 @@ password prompt from the authorize request. Instead each entry can name its
 IdP's sign-out URL as `idp_logout_url` in `mock/approved_institutions.json`.
 Globus's sign-out page then shows **Continue to <institution> sign-out**, which
 goes to `/logout/idp?institution=<id>` and on to that URL (only URLs from
-the approved list are used). Configured: UT Austin (Shibboleth
-`/idp/profile/Logout`), UChicago (Okta `/login/signout`), Illinois
-(Microsoft `/common/oauth2/v2.0/logout`), SDSC (UCSD Shibboleth
-`a5.ucsd.edu/tritON/profile/Logout`), Stanford (Shibboleth
-`/idp/profile/Logout`). SDSC has no IdP of its own in Globus (`sdsc.edu`
-stops at the organization picker), so its entry uses UC San Diego's
-`ucsd.edu`, and SDSC users come back as `@ucsd.edu` identities. USC
-(Shibboleth `shibboleth.usc.edu/idp/profile/Logout`) and MIT (Okta
-`okta.mit.edu/login/signout`, behind the Touchstone proxy `idp.mit.edu`)
-are listed but not approved: their Globus details are real, but **Log in**
-shows the **Filtered** page. UChicago and Illinois sit behind a
-Shibboleth proxy (`shibboleth2.uchicago.edu`, `shibboleth.illinois.edu`)
-whose own session is not ended by this, so the IdP may still sign you in
-silently while the proxy's session lasts.
+the approved list are used). Each was checked in a browser to complete a
+sign-out:
+
+| Entry | Login chain after CILogon | `idp_logout_url` |
+|---|---|---|
+| UT Austin | Shibboleth `enterprise.login.utexas.edu` | `…/idp/profile/Logout` |
+| UChicago | Cirrus proxy `shibboleth2.uchicago.edu` → Okta | `uchicago.okta.com/login/signout` |
+| Illinois | Shibboleth `shibboleth.illinois.edu` → Microsoft (tenant `44467e6f-…`) | `shibboleth.illinois.edu/idp/profile/Logout` |
+| SDSC | UCSD Shibboleth `a5.ucsd.edu` | `a5.ucsd.edu/tritON/profile/Logout` |
+| Stanford | Shibboleth `login.stanford.edu` | `…/idp/profile/Logout` |
+| USC | Shibboleth `shibboleth.usc.edu` | `…/idp/profile/Logout` |
+| MIT | Touchstone proxy `idp.mit.edu` → Okta | `okta.mit.edu/login/signout` |
+
+Illinois's Shibboleth sign-out ends its own session and then hands off to
+Microsoft's (`wsfederation?wa=wsignout1.0`), so one URL clears both. The
+UChicago and MIT proxies' own sign-outs (`shibboleth2.uchicago.edu/idp/profile/Logout`,
+`idp.mit.edu/idp/profile/Logout`) end only the proxy session, so those
+entries sign out of Okta, which is what asks for the password; the proxy
+may still sign you in silently while its own session lasts. SDSC has no IdP
+of its own in Globus (`sdsc.edu` stops at the organization picker), so its
+entry uses UC San Diego's `ucsd.edu`, and SDSC users come back as
+`@ucsd.edu` identities. USC and MIT are listed but not approved: their
+Globus details are real, but **Log in** shows the **Filtered** page.
 
 ## The test IdP (`src/test_idp.rs`)
 
