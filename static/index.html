@@ -14,6 +14,12 @@
   a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
   a.dry { margin-left: .6rem; font-size: .9rem; }
   form.logout button { font: inherit; padding: .35rem .9rem; }
+  dialog { width: min(40rem, calc(100vw - 2rem)); border: 1px solid #ccd; border-radius: 6px; padding: 1.2rem; }
+  dialog::backdrop { background: rgba(20, 25, 35, .45); }
+  dialog h2 { margin: 0 0 .6rem; font-size: 1.1rem; }
+  #url-text { display: block; padding: .6rem; word-break: break-all; }
+  dialog .actions { display: flex; justify-content: flex-end; margin-top: 1rem; }
+  dialog button { font: inherit; padding: .35rem .9rem; }
 </style>
 </head>
 <body>
@@ -27,7 +33,34 @@
     <span class="note">Revokes this app's Globus token, clears its cookies and signs you out of auth.globus.org.</span>
   </form>
   <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
+  <dialog id="url-dialog" aria-labelledby="url-title">
+    <h2 id="url-title"></h2>
+    <code id="url-text"></code>
+    <p class="note" id="url-mode"></p>
+    <form method="dialog" class="actions"><button>Close</button></form>
+  </dialog>
 <script>
+  const dialog = document.getElementById('url-dialog');
+  // Click on the backdrop (outside the dialog box) closes it, as Esc and Close do.
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
+
+  function showUrl(inst, dryRunHref) {
+    document.getElementById('url-title').textContent = 'Authorize URL for ' + inst.name;
+    const text = document.getElementById('url-text');
+    const mode = document.getElementById('url-mode');
+    text.textContent = 'Loading…';
+    mode.textContent = '';
+    dialog.showModal();
+    fetch(dryRunHref)
+      .then(r => r.json())
+      .then(body => {
+        if (body.status !== 'success') throw new Error(body.message);
+        text.textContent = body.result.authorize_url;
+        mode.textContent = body.result.mock_mode ? 'Mock mode: this points at the built-in mock Globus.' : '';
+      })
+      .catch(e => { text.textContent = 'Failed to get the URL: ' + e.message; });
+  }
+
   fetch('/login/institutions')
     .then(r => r.json())
     .then(body => {
@@ -42,6 +75,8 @@
         const actions = document.createElement('span');
         const q = 'institution=' + encodeURIComponent(inst.id);
         actions.innerHTML = `<a class="btn" href="/login?${q}">Log in</a><a class="dry" href="/login?${q}&dry_run=true">see URL</a>`;
+        const dry = actions.querySelector('a.dry');
+        dry.addEventListener('click', e => { e.preventDefault(); showUrl(inst, dry.href); });
         li.append(label, actions);
         ul.append(li);
       }
