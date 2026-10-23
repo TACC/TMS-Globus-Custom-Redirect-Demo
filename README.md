@@ -318,27 +318,33 @@ CI (`.github/workflows/ci.yml`) runs all of them.
 
 The API contract tests in `src/institutions_api.rs` call the API in-process
 and validate the responses against the schemas in `api/openapi.yaml`, check
-their headers (`Link`, `Cache-Control`, the weak `ETag` and
-`304 Not Modified`, `HEAD`, CORS and the `OPTIONS` preflight on the list for
-each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), the RFC 9457
-errors (404, 405, and 500/503 from a broken or missing registry file), and
-check that every field the spec maps with `x-schema-org` maps to the same
-term in the JSON-LD context. `scripts/check_jsonld.py` expands the spec's
-example with that context and checks the resulting RDF; with
-`--url <base>` it does the same for a live deployment's list and the context
-its `Link` header names.
+their headers (`Link`, `Cache-Control`, the weak `ETag`
+`W/"<version>;r<n>"`, `If-None-Match` parsed by the RFC 9110 grammar and
+`If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS` preflight on
+the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), the
+RFC 9457 errors (404, 405, 412, and 500/503 from a broken or missing
+registry file), and check that every field the spec maps with
+`x-schema-org` maps to the same term in the JSON-LD context.
+`scripts/check_jsonld.py` expands the spec's example with that context and
+checks the resulting RDF, counting each mapped field against the entries;
+with `--url <base>` it does the same for a live deployment's list and the
+context its `Link` header names, and `--spec <path>` checks another copy of
+the spec.
 
 `conformance/` is a black-box suite for any implementation of the spec, in
-any language: it takes its expectations from `api/openapi.yaml` and the
-context files only.
+any language: it takes every expectation from the spec (including the
+SHA-256 of each context revision, `x-context-sha256`), so it can be copied
+next to any copy of `openapi.yaml`.
 
 ```bash
 API_BASE_URL=https://tms.example.org API_CORS='https://portal.example.org' \
-    python -m pytest conformance
+    python -m pytest conformance            # API_SPEC=<path> for another copy of the spec
 ```
 
 `API_CORS` is the deployment's allowed-origin setting (empty, `*`, or
-comma-separated origins). `run_against_demo.sh` starts the demo three times,
+comma-separated origins). Header lists are compared as sets, and
+`Cache-Control` as the directives it must carry, as the spec's "Header
+values" section allows. `run_against_demo.sh` starts the demo three times,
 once per kind of setting, and runs the suite and `check_jsonld.py --url`
 against each. The 500 and 503 responses cannot be caused from outside, so
 only the in-process tests cover them.
@@ -350,8 +356,9 @@ changes; a test fails if it does. Revision 2 is revision 1 without
 `@version: 1.1`, which it did not need. To change the context, add the next
 revision (`.r3.jsonld`) with rows for it in `CONTEXTS` and the tests'
 `CONTEXT_SHA256` (in `src/institutions_api.rs`), add it to the spec's
-`revision` enum, and point the spec's `Link` header and context example at
-it. Every revision stays served, and the tests check that each is
+`revision` enum and its hash to `x-context-sha256`, and point the spec's
+`Link` header, `ETag` examples and context example at it. The list's `ETag`
+names the context revision, so it changes with it. Every revision stays served, and the tests check that each is
 unchanged, has its own file, is documented in the spec, and that the `Link`
 header and the spec's examples name the latest. `api/schema-org.md` explains
 the choice of linked-data terms.

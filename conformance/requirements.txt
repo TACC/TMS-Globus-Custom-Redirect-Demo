@@ -1,4 +1,6 @@
+fqdn==1.6.0
 jsonschema==4.26.0
 pyld==3.3.0
 pytest==9.1.1
 pyyaml==6.0.3
+rfc3986-validator==0.1.1

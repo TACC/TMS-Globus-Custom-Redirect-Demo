@@ -21,6 +21,9 @@ use serde_json::json;
 pub const LIST_PATH: &str = "/api/v1/institutions";
 /// The `Allow` header of the list's preflight and 405s.
 const LIST_ALLOW: &str = "GET, HEAD, OPTIONS";
+/// The response headers cross-origin scripts may read from the list.
+const EXPOSE_HEADERS: &str = "ETag, Link, Retry-After";
+const CONTEXT_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// One published revision of the JSON-LD context: api/institutions.context.r<n>.jsonld,
 /// served at `context_path(n)`.
 pub struct ContextRevision {
@@ -110,7 +113,7 @@ impl Cors {
     fn list_headers(&self, request: &HeaderMap) -> HeaderMap {
         let mut out = HeaderMap::new();
         if self.allow_origin(request, &mut out) {
-            out.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("ETag, Link"));
+            out.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static(EXPOSE_HEADERS));
         }
         out
     }
@@ -127,8 +130,11 @@ struct ApiState {
 pub fn router<S: Clone + Send + Sync + 'static>(registry: RegistrySource, base_url: String, cors: Cors) -> Router<S> {
     Router::new()
         .route(LIST_PATH, get(list_institutions).options(preflight_institutions).fallback(list_method_not_allowed))
-        // The contexts, and a 404 for every other path in the API's namespace.
+        // The contexts, and a 404 for every other path in the API's namespace,
+        // the namespace itself included (`{*path}` needs a non-empty tail).
         .route("/api/v1/{*path}", any(api_path))
+        .route("/api/v1", any(api_root))
+        .route("/api/v1/", any(api_root))
         .with_state(ApiState { registry, base_url, cors })
 }
 
@@ -146,31 +152,72 @@ fn problem(status: StatusCode, detail: &str, mut headers: HeaderMap) -> Response
     (status, headers, body.to_string()).into_response()
 }
 
-/// 503 for a registry that could not be read (worth a retry), 500 for one
-/// that is invalid. The cause goes to the server's log, not to the public.
+/// 503 for institution data that could not be read (worth a retry), 500 for
+/// data that is invalid. The cause goes to the server's log, not to the public.
 fn registry_problem(e: &RegistryError, headers: HeaderMap) -> Response {
     eprintln!("institutions list: {e}");
     match e {
         RegistryError::Unavailable(_) => {
-            problem(StatusCode::SERVICE_UNAVAILABLE, "The institution registry cannot be read right now.", headers)
+            problem(StatusCode::SERVICE_UNAVAILABLE, "The institution data cannot be read right now.", headers)
         }
-        RegistryError::Invalid(_) => problem(StatusCode::INTERNAL_SERVER_ERROR, "The institution registry is invalid.", headers),
+        RegistryError::Invalid(_) => problem(StatusCode::INTERNAL_SERVER_ERROR, "The institution data is invalid.", headers),
     }
 }
 
-/// Whether `If-None-Match` matches the list's current `etag` (none when the
-/// data has no version). `*` always does; otherwise one of its tags must
-/// equal `etag` by the weak comparison RFC 9110 prescribes for it, so
-/// `"v"` and `W/"v"` both match `W/"v"`.
-fn none_match(headers: &HeaderMap, etag: Option<&str>) -> bool {
-    let opaque = |t: &str| t.strip_prefix("W/").unwrap_or(t).to_string();
-    headers
-        .get_all(header::IF_NONE_MATCH)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(|t| t.trim())
-        .any(|t| t == "*" || etag.is_some_and(|e| opaque(t) == opaque(e)))
+/// A request's field lines for `name`, joined into one value as RFC 9110
+/// allows; None when there are none.
+fn field(headers: &HeaderMap, name: header::HeaderName) -> Option<Vec<u8>> {
+    let lines: Vec<&[u8]> = headers.get_all(name).iter().map(HeaderValue::as_bytes).collect();
+    (!lines.is_empty()).then(|| lines.join(&b", "[..]))
+}
+
+fn trim_ows(b: &[u8]) -> &[u8] {
+    let start = b.iter().position(|c| !matches!(c, b' ' | b'\t')).unwrap_or(b.len());
+    let end = b.iter().rposition(|c| !matches!(c, b' ' | b'\t')).map_or(start, |i| i + 1);
+    &b[start..end.max(start)]
+}
+
+/// The opaque tags (`"..."`, quotes included, `W/` dropped) of the entity
+/// tags in an `If-None-Match` list. Members that are not entity tags are
+/// skipped, so the rest of the list still counts.
+fn entity_tags(field: &[u8]) -> Vec<&[u8]> {
+    // etagc: %x21 / %x23-7E / obs-text, so commas may sit inside a tag.
+    let etagc = |c: u8| c == 0x21 || (0x23..=0x7e).contains(&c) || c >= 0x80;
+    let mut tags = Vec::new();
+    let mut rest = field;
+    while !rest.is_empty() {
+        let member = trim_ows(rest);
+        let body = member.strip_prefix(b"W/").unwrap_or(member);
+        let tag = body
+            .strip_prefix(b"\"")
+            .and_then(|inner| inner.iter().position(|&c| c == b'"'))
+            .map(|end| (&body[..end + 2], trim_ows(&body[end + 2..])))
+            .filter(|(tag, after)| tag[1..tag.len() - 1].iter().all(|&c| etagc(c)) && (after.is_empty() || after[0] == b','));
+        match tag {
+            Some((tag, after)) => {
+                tags.push(tag);
+                rest = after.strip_prefix(b",").unwrap_or(after);
+            }
+            // Not an entity tag: skip to the next member.
+            None => rest = member.iter().position(|&c| c == b',').map_or(&[][..], |i| &member[i + 1..]),
+        }
+    }
+    tags
+}
+
+/// Evaluates `If-Match` and then `If-None-Match` against a resource that
+/// exists and has the weak `etag` (None if it has none), as RFC 9110
+/// §13.2.2 orders them: the status to answer with instead, if any.
+fn preconditions(headers: &HeaderMap, etag: Option<&str>) -> Option<StatusCode> {
+    // If-Match compares strongly, and every tag here is weak, so only `*` passes.
+    if field(headers, header::IF_MATCH).is_some_and(|f| trim_ows(&f) != b"*") {
+        return Some(StatusCode::PRECONDITION_FAILED);
+    }
+    let field = field(headers, header::IF_NONE_MATCH)?;
+    // `*` is only valid as the whole field, never as a list member.
+    let ours = etag.map(|e| e.strip_prefix("W/").unwrap_or(e).as_bytes());
+    let matched = trim_ows(&field) == b"*" || ours.is_some_and(|ours| entity_tags(&field).contains(&ours));
+    matched.then_some(StatusCode::NOT_MODIFIED)
 }
 
 async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> Response {
@@ -179,22 +226,25 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
         Ok(registry) => registry,
         Err(e) => return registry_problem(&e, out),
     };
-    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    // Weak: `version` names the data's revision, not these exact bytes. It
-    // is checked to be ETag-safe when the registry loads.
-    let etag = registry.version().map(|v| format!("W/\"{v}\""));
-    if let Some(tag) = &etag {
-        out.insert(header::ETAG, HeaderValue::from_str(tag).expect("version is ETag-safe"));
-    }
-    if none_match(&headers, etag.as_deref()) {
-        return (StatusCode::NOT_MODIFIED, out).into_response();
+    let revision = latest_context().revision;
+    // Weak: it names the data's and the context's revisions, not these exact
+    // bytes, and changes when either does. `version` is checked to be
+    // ETag-safe when the registry loads.
+    let etag = registry.version().map(|v| format!("W/\"{v};r{revision}\""));
+    match preconditions(&headers, etag.as_deref()) {
+        Some(StatusCode::PRECONDITION_FAILED) => return problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
+        Some(status) => {
+            add_list_validators(&mut out, etag.as_deref());
+            return (status, out).into_response();
+        }
+        None => add_list_validators(&mut out, etag.as_deref()),
     }
     // `type` makes the list a schema:ItemList under the JSON-LD context, and
     // the Link header tells JSON-LD processors where that context is.
     let link = format!(
         r#"<{}{}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#,
         api.base_url,
-        context_path(latest_context().revision)
+        context_path(revision)
     );
     out.insert(header::LINK, HeaderValue::from_str(&link).expect("BASE_URL is a valid header value"));
     let mut body = json!({
@@ -207,6 +257,14 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
         body["version"] = v.into();
     }
     (out, Json(body)).into_response()
+}
+
+/// The caching headers a 200 and a 304 of the list share.
+fn add_list_validators(out: &mut HeaderMap, etag: Option<&str>) {
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Some(tag) = etag {
+        out.insert(header::ETAG, HeaderValue::from_str(tag).expect("version is ETag-safe"));
+    }
 }
 
 /// The preflight before a cross-origin GET that sets If-None-Match. The
@@ -230,13 +288,24 @@ async fn list_method_not_allowed(State(api): State<ApiState>, method: Method, he
     problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
 }
 
+/// Headers for everything under /api/v1 except the list: open to any origin.
+fn any_origin() -> HeaderMap {
+    let mut out = HeaderMap::new();
+    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    out
+}
+
+/// `/api/v1` itself, which names no resource.
+async fn api_root() -> Response {
+    problem(StatusCode::NOT_FOUND, "No such resource.", any_origin())
+}
+
 /// The context revisions, and a 404 for any other path under /api/v1. Open
 /// to any origin, since JSON-LD processors in other sites' pages fetch the
 /// contexts. A revision's URL never changes content, so it can be cached
-/// indefinitely. (axum drops the body of a HEAD response.)
-async fn api_path(method: Method, Path(path): Path<String>) -> Response {
-    let mut out = HeaderMap::new();
-    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+/// indefinitely, and it has no ETag. (axum drops the body of a HEAD response.)
+async fn api_path(method: Method, Path(path): Path<String>, headers: HeaderMap) -> Response {
+    let mut out = any_origin();
     let Some(ctx) = context_revision(&path) else {
         return problem(StatusCode::NOT_FOUND, "No such resource.", out);
     };
@@ -244,9 +313,18 @@ async fn api_path(method: Method, Path(path): Path<String>) -> Response {
         out.insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
         return problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out);
     }
-    out.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/ld+json"));
-    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
-    (out, ctx.body).into_response()
+    match preconditions(&headers, None) {
+        Some(StatusCode::PRECONDITION_FAILED) => problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
+        Some(status) => {
+            out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
+            (status, out).into_response()
+        }
+        None => {
+            out.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/ld+json"));
+            out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
+            (out, ctx.body).into_response()
+        }
+    }
 }
 
 /// Contract tests: the responses are checked against api/openapi.yaml itself,
@@ -267,14 +345,17 @@ mod tests {
     const BASE: &str = "https://tms.example.org";
     /// The spec's path for every context revision.
     const CONTEXT_SPEC_PATH: &str = "/api/v1/institutions.context.r{revision}.jsonld";
-    /// The mock registry's ETag.
-    const MOCK_ETAG: &str = "W/\"mock-0.1.0\"";
     /// SHA-256 of each published api/institutions.context.r<n>.jsonld, line
     /// endings normalised. Add a row with each new revision; never edit one.
     const CONTEXT_SHA256: &[(u32, &str)] = &[
         (1, "0c053922807aef6eb421cffc9fe70b6dc266886907109972530d2d44a6851f93"),
         (2, "615ed222b4642a186c6bd17d4dbbe895cc10c33fbab6f08ca672b917989b14b0"),
     ];
+
+    /// The mock registry's ETag: its version and the latest context revision.
+    fn mock_etag() -> String {
+        format!("W/\"mock-0.1.0;r{}\"", latest_context().revision)
+    }
 
     fn sha256(text: &str) -> String {
         use sha2::{Digest, Sha256};
@@ -323,7 +404,8 @@ mod tests {
     }
 
     async fn send(registry: &str, cors: Cors, method: Method, path: &str, headers: &[(header::HeaderName, &str)]) -> (StatusCode, HeaderMap, Vec<u8>) {
-        send_to(fixed(registry), cors, method, path, headers).await
+        let headers: Vec<_> = headers.iter().map(|(n, v)| (n.clone(), HeaderValue::from_str(v).unwrap())).collect();
+        send_to(fixed(registry), cors, method, path, &headers).await
     }
 
     async fn send_to(
@@ -331,12 +413,12 @@ mod tests {
         cors: Cors,
         method: Method,
         path: &str,
-        headers: &[(header::HeaderName, &str)],
+        headers: &[(header::HeaderName, HeaderValue)],
     ) -> (StatusCode, HeaderMap, Vec<u8>) {
         let app: Router = router(source, BASE.into(), cors);
         let mut req = Request::builder().method(method).uri(path);
         for (name, value) in headers {
-            req = req.header(name, *value);
+            req = req.header(name, value);
         }
         let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
         let (parts, body) = resp.into_parts();
@@ -355,6 +437,7 @@ mod tests {
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_valid("Problem", &body);
         assert_eq!(body["status"], expected.as_u16());
+        assert_eq!(body["title"], expected.canonical_reason().unwrap(), "title is the status phrase");
     }
 
     #[tokio::test]
@@ -364,8 +447,8 @@ mod tests {
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
         assert_eq!(header(&headers, header::LINK), Some(link_to(&context_path(latest_context().revision)).as_str()));
         assert_eq!(header(&headers, header::CACHE_CONTROL), Some(spec_header("ListCacheControl").as_str()));
-        assert_eq!(header(&headers, header::ETAG), Some(MOCK_ETAG));
-        assert!(header_fits("ETag", MOCK_ETAG));
+        assert_eq!(header(&headers, header::ETAG), Some(mock_etag().as_str()));
+        assert!(header_fits("ETag", &mock_etag()));
         // Same-origin only: no CORS headers at all.
         assert!(!headers.keys().any(|k| k.as_str().starts_with("access-control-")));
         assert!(header(&headers, header::VARY).is_none());
@@ -376,22 +459,42 @@ mod tests {
     }
 
     #[test]
-    fn spec_etag_is_weak() {
-        assert!(header_fits("ETag", "W/\"2026-10-23.1\""));
-        for bad in ["\"2026-10-23.1\"", "W/2026", "W/\"a,b\"", "W/\"\""] {
+    fn spec_etag_is_weak_and_names_the_context() {
+        assert!(header_fits("ETag", "W/\"2026-10-23.1;r2\""));
+        for bad in ["\"2026-10-23.1;r2\"", "W/\"2026-10-23.1\"", "W/\"2026;r0\"", "W/\"a,b;r2\"", "W/\";r2\""] {
             assert!(!header_fits("ETag", bad), "{bad}");
         }
     }
 
-    /// HEAD gets GET's status and headers, without the body.
+    /// Query strings and Accept change nothing.
+    #[tokio::test]
+    async fn query_and_accept_are_ignored() {
+        let (_, _, plain) = get(MOCK, LIST_PATH, None).await;
+        let (status, _, body) = get(MOCK, &format!("{LIST_PATH}?format=xml&x=1"), None).await;
+        assert_eq!((status, &body), (StatusCode::OK, &plain));
+        let (status, headers, body) = request(MOCK, Cors::SameOrigin, LIST_PATH, &[(header::ACCEPT, "application/xml")]).await;
+        assert_eq!((status, &body), (StatusCode::OK, &plain));
+        assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
+        let context = context_path(latest_context().revision);
+        let (status, headers, _) = request(MOCK, Cors::SameOrigin, &format!("{context}?x=1"), &[(header::ACCEPT, "text/html")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
+    }
+
+    /// HEAD gets GET's status and headers, without the body, on the list
+    /// (also when If-None-Match matches) and on the contexts.
     #[tokio::test]
     async fn head_matches_get() {
-        let (_, get_headers, _) = get(MOCK, LIST_PATH, None).await;
-        let (status, headers, body) = send(MOCK, Cors::SameOrigin, Method::HEAD, LIST_PATH, &[]).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.is_empty());
-        for name in [header::CONTENT_TYPE, header::LINK, header::ETAG, header::CACHE_CONTROL] {
-            assert_eq!(header(&headers, name.clone()), header(&get_headers, name.clone()), "{name}");
+        let context = context_path(latest_context().revision);
+        let etag = mock_etag();
+        let cors = Cors::Origins(vec![PORTAL.into()]);
+        for (path, tag) in [(LIST_PATH, None), (LIST_PATH, Some(etag.as_str())), (context.as_str(), None), (context.as_str(), Some("*"))] {
+            let headers: Vec<_> = [(header::ORIGIN, PORTAL)].into_iter().chain(tag.map(|t| (header::IF_NONE_MATCH, t))).collect();
+            let (get_status, get_headers, _) = send(MOCK, cors.clone(), Method::GET, path, &headers).await;
+            let (status, out, body) = send(MOCK, cors.clone(), Method::HEAD, path, &headers).await;
+            assert_eq!(status, get_status, "{path} {tag:?}");
+            assert!(body.is_empty());
+            assert_eq!(out, get_headers, "{path} {tag:?}");
         }
     }
 
@@ -463,10 +566,11 @@ mod tests {
     #[tokio::test]
     async fn listed_origins_may_read_the_list() {
         let cors = Cors::Origins(vec![PORTAL.into(), "http://localhost:3000".into()]);
-        for extra in [None, Some((header::IF_NONE_MATCH, MOCK_ETAG))] {
+        let etag = mock_etag();
+        for (extra, expected) in [(None, StatusCode::OK), (Some((header::IF_NONE_MATCH, etag.as_str())), StatusCode::NOT_MODIFIED)] {
             let headers: Vec<_> = [(header::ORIGIN, PORTAL)].into_iter().chain(extra).collect();
             let (status, headers, _) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
-            assert!(matches!(status, StatusCode::OK | StatusCode::NOT_MODIFIED));
+            assert_eq!(status, expected);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{status}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(spec_header("CorsExposeHeaders").as_str()));
             assert_eq!(header(&headers, header::VARY), Some(spec_header("VaryOrigin").as_str()));
@@ -485,8 +589,9 @@ mod tests {
     /// `*` gives the same headers on 200 and 304, with or without an Origin.
     #[tokio::test]
     async fn any_origin_may_read_the_list() {
+        let etag = mock_etag();
         for origin in [Some(PORTAL), None] {
-            for tag in [None, Some(MOCK_ETAG)] {
+            for tag in [None, Some(etag.as_str())] {
                 let headers: Vec<_> = origin
                     .map(|o| (header::ORIGIN, o))
                     .into_iter()
@@ -496,7 +601,7 @@ mod tests {
                 let expected = if tag.is_some() { StatusCode::NOT_MODIFIED } else { StatusCode::OK };
                 assert_eq!(status, expected, "{origin:?}");
                 assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{origin:?} {status}");
-                assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some("ETag, Link"), "{origin:?} {status}");
+                assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{origin:?} {status}");
                 assert!(header(&headers, header::VARY).is_none(), "{origin:?} {status}");
                 assert!(header(&headers, header::ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
             }
@@ -516,35 +621,83 @@ mod tests {
         }
     }
 
+    /// The approved entries, in the mock registry's order (the demo's stable
+    /// order), and nothing else.
     #[tokio::test]
-    async fn list_holds_only_approved_entries_in_registry_order() {
+    async fn list_holds_only_approved_entries_in_a_stable_order() {
         let (_, _, body) = get(MOCK, LIST_PATH, None).await;
         let body: Value = serde_json::from_slice(&body).unwrap();
         let ids: Vec<&str> = body["result"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
-        let expected: Vec<String> = Registry::from_json(MOCK).unwrap().approved().into_iter().map(|i| i.id).collect();
-        assert_eq!(ids, expected);
-        for hidden in ["illinois", "usc", "mit", "example"] {
-            assert!(!ids.contains(&hidden), "{hidden}");
-        }
+        assert_eq!(ids, ["globus", "uchicago", "utexas", "sdsc", "stanford", "tacc_tapis"]);
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "each id at most once");
+        let (_, _, again) = get(MOCK, LIST_PATH, None).await;
+        assert_eq!(serde_json::from_slice::<Value>(&again).unwrap(), body, "same order on every request");
     }
 
     #[tokio::test]
     async fn matching_etag_gets_not_modified() {
-        for tag in [MOCK_ETAG, "\"mock-0.1.0\"", "\"old\", W/\"mock-0.1.0\"", "*"] {
+        let etag = mock_etag();
+        let strong = etag.trim_start_matches("W/").to_string();
+        let listed = format!("\"old\", {etag}");
+        let malformed_first = format!("garbage, W/\"x, {etag}");
+        for tag in [etag.as_str(), &strong, &listed, &malformed_first, "*", " * "] {
             let (status, headers, body) = get(MOCK, LIST_PATH, Some(tag)).await;
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{tag}");
-            assert_eq!(header(&headers, header::ETAG), Some(MOCK_ETAG));
+            assert_eq!(header(&headers, header::ETAG), Some(etag.as_str()));
             assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-cache"));
             assert!(header(&headers, header::LINK).is_none(), "{tag}");
+            assert!(header(&headers, header::CONTENT_TYPE).is_none(), "{tag}");
             assert!(body.is_empty());
         }
-        // Another tag, or one that is not a quoted tag at all.
-        for tag in ["\"old\"", "W/\"old\"", "mock-0.1.0"] {
+        // Another tag; one naming only the data's version (an older context);
+        // members that are not entity tags; `*` inside a list.
+        for tag in ["\"old\"", "W/\"old\"", "W/\"mock-0.1.0\"", "mock-0.1.0;r2", "w/\"mock-0.1.0;r2\"", "\"old\", *", "*, \"old\""] {
             let (status, _, _) = get(MOCK, LIST_PATH, Some(tag)).await;
             assert_eq!(status, StatusCode::OK, "{tag}");
         }
+    }
+
+    /// A field that is not valid UTF-8 (obs-text) still has its entity tags read.
+    #[tokio::test]
+    async fn non_ascii_if_none_match_is_still_read() {
+        let mut bytes = format!("{}, \"", mock_etag()).into_bytes();
+        bytes.extend_from_slice(b"\xff\"");
+        let headers = [(header::IF_NONE_MATCH, HeaderValue::from_bytes(&bytes).unwrap())];
+        let (status, _, _) = send_to(fixed(MOCK), Cors::SameOrigin, Method::GET, LIST_PATH, &headers).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+    }
+
+    #[test]
+    fn entity_tags_are_parsed_by_the_grammar() {
+        assert_eq!(entity_tags(b"\"a\", W/\"b\",,  \"c,d\""), [&b"\"a\""[..], b"\"b\"", b"\"c,d\""]);
+        assert_eq!(entity_tags(b"*, \"a\""), [&b"\"a\""[..]]);
+        assert_eq!(entity_tags(b"\"a\" \"b\", \"c\""), [&b"\"c\""[..]]);
+        assert!(entity_tags(b"\"a").is_empty());
+        assert!(entity_tags(b"\"a\"b\"").is_empty());
+        assert!(entity_tags(b"").is_empty());
+    }
+
+    /// Every tag here is weak, so If-Match (strong comparison) only passes as `*`.
+    #[tokio::test]
+    async fn if_match_passes_only_as_any() {
+        let cors = Cors::Origins(vec![PORTAL.into()]);
+        let etag = mock_etag();
+        let (status, _, _) = request(MOCK, cors.clone(), LIST_PATH, &[(header::IF_MATCH, "*")]).await;
+        assert_eq!(status, StatusCode::OK);
+        for tag in [etag.as_str(), "\"mock-0.1.0;r2\"", "\"x\""] {
+            let headers = [(header::ORIGIN, PORTAL), (header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
+            let (status, headers, body) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
+            assert_problem(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
+            assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{tag}");
+            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{tag}");
+        }
+        let context = context_path(latest_context().revision);
+        let (status, headers, body) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "\"x\"")]).await;
+        assert_problem(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
+        assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
+        let (status, _, _) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "*")]).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -571,7 +724,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("registry-{}.json", uuid::Uuid::new_v4()));
         let source = RegistrySource::File(path.to_str().unwrap().into());
         let cors = Cors::Origins(vec![PORTAL.into()]);
-        let headers = [(header::ORIGIN, PORTAL), (header::IF_NONE_MATCH, "*")];
+        let headers = [(header::ORIGIN, HeaderValue::from_static(PORTAL)), (header::IF_NONE_MATCH, HeaderValue::from_static("*"))];
         for (contents, expected) in [(None, StatusCode::SERVICE_UNAVAILABLE), (Some("{"), StatusCode::INTERNAL_SERVER_ERROR)] {
             if let Some(c) = contents {
                 std::fs::write(&path, c).unwrap();
@@ -579,7 +732,7 @@ mod tests {
             let (status, out, body) = send_to(source.clone(), cors.clone(), Method::GET, LIST_PATH, &headers).await;
             assert_problem(status, expected, &out, &body);
             assert_eq!(header(&out, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL));
-            assert_eq!(header(&out, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some("ETag, Link"));
+            assert_eq!(header(&out, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS));
             assert_eq!(header(&out, header::VARY), Some("Origin"));
             assert!(!String::from_utf8_lossy(&body).contains("registry-"), "no file name in {expected}");
         }
@@ -592,12 +745,12 @@ mod tests {
     #[tokio::test]
     async fn other_methods_get_method_not_allowed() {
         let cors = Cors::Origins(vec![PORTAL.into()]);
-        for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+        for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::TRACE] {
             let (status, headers, body) = send(MOCK, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
             assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
             assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{method}");
-            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some("ETag, Link"), "{method}");
+            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{method}");
             assert_eq!(header(&headers, header::VARY), Some("Origin"), "{method}");
         }
         let context = context_path(latest_context().revision);
@@ -618,14 +771,17 @@ mod tests {
             assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{path}");
         }
-        for path in ["/api/v1/institutions.context.jsonld", "/api/v1/nope", "/api/v1/institutions/uchicago"] {
-            let (status, headers, body) = send(MOCK, Cors::SameOrigin, Method::POST, path, &[]).await;
-            assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
+        for path in ["/api/v1", "/api/v1/", "/api/v1/institutions/", "/api/v1/institutions.context.jsonld", "/api/v1/nope", "/api/v1/a/b/c"] {
+            for method in [Method::GET, Method::POST] {
+                let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), path, &[]).await;
+                assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
+                assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method} {path}");
+            }
         }
     }
 
     /// Every revision ever published is still served, unchanged, with the
-    /// headers that let it be cached forever.
+    /// headers that let it be cached forever; `If-None-Match: *` gets a 304.
     #[tokio::test]
     async fn every_context_revision_is_served() {
         for ctx in CONTEXTS {
@@ -634,18 +790,27 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{path}");
             assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
-            assert_eq!(header(&headers, header::CACHE_CONTROL), Some("public, max-age=31536000, immutable"));
+            assert_eq!(header(&headers, header::CACHE_CONTROL), Some(spec_header("ContextCacheControl").as_str()));
             assert_eq!(body, ctx.body.as_bytes(), "{path}");
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert!(body["@context"].is_object(), "{path}");
+
+            let (status, headers, body) = get(MOCK, &path, Some("*")).await;
+            assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
+            assert!(body.is_empty());
+            assert_eq!(header(&headers, header::CACHE_CONTROL), Some(CONTEXT_CACHE_CONTROL));
+            assert!(header(&headers, header::CONTENT_TYPE).is_none());
+            let (status, _, _) = get(MOCK, &path, Some("W/\"x\"")).await;
+            assert_eq!(status, StatusCode::OK, "contexts have no ETag to match");
         }
     }
 
     /// Published revisions are cached indefinitely, so they are frozen. To
     /// change the context, add api/institutions.context.r<n+1>.jsonld, a
     /// CONTEXTS row and a CONTEXT_SHA256 row for it, add n+1 to the spec's
-    /// `revision` enum, and point the spec's Link header text, its example
-    /// and the context example at it; the tests below catch a missed step.
+    /// `revision` enum and its hash to `x-context-sha256`, and point the
+    /// spec's Link header, ETag example and context example at it; the tests
+    /// below catch a missed step.
     #[test]
     fn published_contexts_do_not_change() {
         let revisions: Vec<u32> = CONTEXTS.iter().map(|c| c.revision).collect();
@@ -657,6 +822,16 @@ mod tests {
         }
     }
 
+    /// The spec publishes the same hashes, so a separate server's copy can be
+    /// checked against them.
+    #[test]
+    fn spec_publishes_the_context_hashes() {
+        let spec = spec();
+        let published = spec["paths"][CONTEXT_SPEC_PATH]["get"]["x-context-sha256"].as_object().unwrap().clone();
+        let pinned: serde_json::Map<String, Value> = CONTEXT_SHA256.iter().map(|(r, sha)| (r.to_string(), json!(sha))).collect();
+        assert_eq!(published, pinned);
+    }
+
     /// The files in api/ are exactly the served revisions, each named for its
     /// revision, so a file cannot be added without serving it or served
     /// under the wrong number.
@@ -666,7 +841,7 @@ mod tests {
         let mut files: Vec<String> = std::fs::read_dir(&api)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|f| f.starts_with("institutions.context.") && !f.contains(':'))
+            .filter(|f| f.starts_with("institutions.context."))
             .collect();
         files.sort();
         let mut expected: Vec<String> = CONTEXTS.iter().map(|c| format!("institutions.context.r{}.jsonld", c.revision)).collect();
@@ -680,32 +855,33 @@ mod tests {
 
     /// The spec's `revision` enum lists every served revision and no other,
     /// and everywhere it names a revision (the Link header's text and
-    /// example) it names the latest one.
+    /// example, the ETag examples) it names the latest one.
     #[test]
     fn spec_documents_every_revision_and_links_the_latest() {
         let spec = spec();
         let context_paths: Vec<&String> = spec["paths"].as_object().unwrap().keys().filter(|p| p.contains("institutions.context.")).collect();
         assert_eq!(context_paths, [CONTEXT_SPEC_PATH], "one templated path for every revision");
-        let param = &spec["paths"][CONTEXT_SPEC_PATH]["get"]["parameters"][0];
+        let param = &spec["components"]["parameters"]["Revision"];
         assert_eq!(param["name"], "revision");
-        let documented: Vec<u64> = param["schema"]["enum"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
-        let served: Vec<u64> = CONTEXTS.iter().map(|c| c.revision.into()).collect();
+        let documented: Vec<&str> = param["schema"]["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let served: Vec<String> = CONTEXTS.iter().map(|c| c.revision.to_string()).collect();
         assert_eq!(documented, served);
 
         let latest = latest_context().revision;
-        let marker = "institutions.context.r";
         let mut mentions = 0;
-        for line in SPEC.lines() {
-            for (at, _) in line.match_indices(marker) {
-                let digits: String = line[at + marker.len()..].chars().take_while(char::is_ascii_digit).collect();
-                if !digits.is_empty() {
-                    assert_eq!(digits.parse::<u32>().unwrap(), latest, "spec names r{digits}, not the latest r{latest}: {line}");
-                    mentions += 1;
+        for marker in ["institutions.context.r", ";r"] {
+            for line in SPEC.lines() {
+                for (at, _) in line.match_indices(marker) {
+                    let digits: String = line[at + marker.len()..].chars().take_while(char::is_ascii_digit).collect();
+                    if !digits.is_empty() {
+                        assert_eq!(digits.parse::<u32>().unwrap(), latest, "spec names r{digits}, not the latest r{latest}: {line}");
+                        mentions += 1;
+                    }
                 }
             }
         }
         assert!(mentions > 0, "the spec names the latest revision");
-        let example = spec["paths"][LIST_PATH]["get"]["responses"]["200"]["headers"]["Link"]["example"].as_str().unwrap();
+        let example = spec["components"]["headers"]["ContextLink"]["example"].as_str().unwrap();
         assert_eq!(example, link_to(&context_path(latest)), "the spec's Link example");
     }
 
@@ -729,16 +905,19 @@ mod tests {
             assert_valid("InstitutionsResponse", &example["value"]);
             assert!(!name.contains("mock"), "example {name:?} names the demo");
         }
-        let problems = [
-            &spec["components"]["responses"]["RegistryInvalid"],
-            &spec["components"]["responses"]["RegistryUnavailable"],
-            &spec["paths"][CONTEXT_SPEC_PATH]["get"]["responses"]["404"],
-        ];
-        for response in problems {
-            for example in response["content"]["application/problem+json"]["examples"].as_object().unwrap().values() {
-                assert_valid("Problem", &example["value"]);
+        let responses = spec["components"]["responses"].as_object().unwrap();
+        let mut checked = 0;
+        for response in responses.values() {
+            if let Some(examples) = response["content"]["application/problem+json"]["examples"].as_object() {
+                for example in examples.values() {
+                    assert_valid("Problem", &example["value"]);
+                    let status = StatusCode::from_u16(example["value"]["status"].as_u64().unwrap() as u16).unwrap();
+                    assert_eq!(example["value"]["title"], status.canonical_reason().unwrap());
+                    checked += 1;
+                }
             }
         }
+        assert!(checked >= 4, "problem examples checked: {checked}");
     }
 
     #[test]

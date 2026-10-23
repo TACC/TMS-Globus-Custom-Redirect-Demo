@@ -1,11 +1,10 @@
 # This file instructs Redocly's linter to ignore the rules contained for specific parts of your API.
 # See https://redocly.com/docs/cli/ for more information.
 #
-# operation-4xx-response stays on for every other operation (the context
-# documents its 404). The list's GET and OPTIONS take no input a client can
-# get wrong, so they have no 4xx; the 405 for other methods is described in
-# info.description, since OpenAPI has no place for a method a path lacks.
+# operation-4xx-response stays on for every other operation. The list's
+# preflight (OPTIONS) takes no input a client can get wrong, so it has no
+# 4xx; the 405 for other methods is described in info.description, since
+# OpenAPI has no place for a method a path lacks.
 api/openapi.yaml:
   operation-4xx-response:
-    - '#/paths/~1api~1v1~1institutions/get/responses'
     - '#/paths/~1api~1v1~1institutions/options/responses'
