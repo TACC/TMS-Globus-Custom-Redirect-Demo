@@ -3,23 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Institution Login Demo</title>
+<title>Login Demo</title>
+<!-- Shared with the landing page: the navbar and its buttons, and the font. -->
+<link rel="stylesheet" href="/static/app.css">
 <style>
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1d2330; }
-  ul { list-style: none; padding: 0; }
-  li { display: flex; justify-content: space-between; align-items: center; gap: 1rem;
-       padding: .7rem 0; border-bottom: 1px solid #ddd; }
-  li > span:first-child { flex: 1; min-width: 0; } /* the label wraps; the buttons stay on the right */
-  li > span:last-child { flex: none; }
+  body { font-size: 16px; line-height: 1.5; color: #1d2330; }
+  .content { max-width: 60rem; margin: 1.5rem auto; padding: 0 .75rem; }
+  .picker { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; margin: 1.2rem 0; }
+  .picker select { font: inherit; flex: 1 1 18rem; min-width: 0; padding: .35rem .5rem; }
   code { background: #f2f3f5; padding: .1rem .3rem; border-radius: 3px; }
   .note { color: #5b6475; }
+  .footnote { font-style: italic; }
   a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
-  a.btn.home { position: absolute; top: 1rem; right: 1rem; }
-  h1 { margin-right: 10rem; } /* keep the heading clear of the Back to Home button on narrow screens */
   a.btn.signout { background: #c62828; }
-  li.unapproved b, li.unapproved code { color: #6b7280; }
-  .tag { font-size: .8rem; color: #6b7280; border: 1px solid #ccd; border-radius: 3px; padding: 0 .3rem; margin-left: .3rem; white-space: nowrap; }
-  a.dry { margin-left: .6rem; font-size: .9rem; }
+  /* The gold of the landing page's banner; dark text keeps it readable. */
+  a.btn.dry { background: #e8a820; color: #1d2330; font-style: normal; display: inline-block; margin-right: .3rem; }
   dialog { width: min(40rem, calc(100vw - 2rem)); border: 1px solid #ccd; border-radius: 6px; padding: 1.2rem; }
   dialog::backdrop { background: rgba(20, 25, 35, .45); }
   dialog h2 { margin: 0 0 .6rem; font-size: 1.1rem; }
@@ -31,14 +29,22 @@
 </style>
 </head>
 <body>
-  <a class="btn home" href="/">&larr; Back to Home</a>
-  <h1>Log in with your institution</h1>
-  <p class="note">The list below comes from <code>GET /login/institutions</code>, which serves the entries of
-  <code>mock/approved_institutions.json</code>; those not <em>approved</em> are greyed out, and their
-  Log in shows why they are blocked instead of signing you in. Choosing one sends you to
-  Globus Auth with <code>redirect_idp_domain</code> set to that institution's domain.</p>
-  <ul id="list"><li>Loading…</li></ul>
-  <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
+  <nav class="navbar">
+    <div class="nav-left">
+      <a class="nav-btn" href="/">Home</a>
+    </div>
+  </nav>
+  <main class="content">
+  <h1>Choose an institution and log in</h1>
+  <p class="note">The dropdown below comes from <code>GET /login/institutions</code>, which serves the entries of
+  <code>mock/approved_institutions.json</code>; only those marked <em>approved</em> are offered.
+  Logging in sends you to Globus Auth with <code>redirect_idp_domain</code> set to the chosen
+  institution's domain.</p>
+  <div class="picker">
+    <select id="institution" aria-label="Institution" disabled><option>Loading…</option></select>
+    <a class="btn" id="login" href="#">Log in</a>
+  </div>
+  <p class="note footnote"><a class="btn dry" id="dry" href="#">Preview URL</a> (calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.)</p>
   <dialog id="url-dialog" aria-labelledby="url-title">
     <h2 id="url-title"></h2>
     <p id="url-blocked"></p>
@@ -46,6 +52,7 @@
     <p class="note" id="url-mode"></p>
     <form method="dialog" class="actions"><button>Close</button></form>
   </dialog>
+  </main>
 <script>
   const dialog = document.getElementById('url-dialog');
   // Click on the backdrop (outside the dialog box) closes it, as Esc and Close do.
@@ -78,60 +85,60 @@
 
   const getJson = url => fetch(url).then(r => r.json()).then(body => body.result);
 
-  // After a login, the button of the row used becomes "Log out": it opens the
-  // provider's sign-out page (Globus or Tapis) in a new tab, ends this app's
-  // session, and turns back into "Log in".
-  function logoutToggle(btn, inst, loginHref, status) {
-    const showLogin = () => {
-      btn.textContent = 'Log in';
-      btn.href = loginHref;
+  const domainLabel = inst => inst.redirect_idp_domain
+    ?? (inst.provider === 'tacc_tapis' ? 'Tapis OAuth2' : 'no redirect_idp_domain');
+
+  // After a login, the button becomes "Log out" while the institution used is
+  // selected: it opens the provider's sign-out page (Globus or Tapis) in a new
+  // tab, ends this app's session, and turns back into "Log in".
+  function renderButton(btn, inst, loginHref, session) {
+    const loggedIn = session.institution === inst.id;
+    btn.textContent = loggedIn ? 'Log out' : 'Log in';
+    btn.href = loggedIn ? (session.logout_url ?? '#') : loginHref;
+    btn.classList.toggle('signout', loggedIn);
+    if (loggedIn) {
+      btn.target = '_blank';
+      btn.rel = 'noopener';
+    } else {
       btn.removeAttribute('target');
-      btn.classList.remove('signout');
-    };
-    if (status.institution !== inst.id) return;
-    btn.textContent = 'Log out';
-    btn.href = status.logout_url ?? '#';
-    btn.target = '_blank';
-    btn.rel = 'noopener';
-    btn.classList.add('signout');
-    btn.addEventListener('click', e => {
-      if (!btn.classList.contains('signout')) return; // plain "Log in" navigation
-      if (!status.logout_url) e.preventDefault(); // mock mode: no sign-out tab to open
-      fetch('/logout?local=true', { method: 'POST' })
-        .finally(showLogin);
-    });
+    }
   }
 
   const status = getJson('/login/status').catch(() => ({ logged_in: false }));
 
   Promise.all([getJson('/login/institutions'), status])
-    .then(([institutions, status]) => {
-      const ul = document.getElementById('list');
-      ul.innerHTML = '';
-      for (const inst of institutions) {
-        const li = document.createElement('li');
-        const label = document.createElement('span');
-        label.innerHTML = '<b></b> <code></code>';
-        label.querySelector('b').textContent = inst.name;
-        label.querySelector('code').textContent = inst.redirect_idp_domain
-          ?? (inst.provider === 'tacc_tapis' ? 'Tapis OAuth2' : 'no redirect_idp_domain');
-        const actions = document.createElement('span');
-        const q = 'institution=' + encodeURIComponent(inst.id);
-        actions.innerHTML = `<a class="btn" href="/login?${q}">Log in</a><a class="dry" href="/login?${q}&dry_run=true">see URL</a>`;
-        const dry = actions.querySelector('a.dry');
-        dry.addEventListener('click', e => { e.preventDefault(); showUrl(inst, dry.href); });
-        logoutToggle(actions.querySelector('a.btn'), inst, `/login?${q}`, status);
-        // Unapproved entries keep a working button: the server answers it with
-        // the "Filtered" page instead of starting the login.
-        if (!inst.approved) {
-          li.className = 'unapproved';
-          label.insertAdjacentHTML('beforeend', '<span class="tag">not approved</span>');
-        }
-        li.append(label, actions);
-        ul.append(li);
-      }
+    .then(([institutions, session]) => {
+      const approved = institutions.filter(inst => inst.approved);
+      const select = document.getElementById('institution');
+      const btn = document.getElementById('login');
+      const dry = document.getElementById('dry');
+      select.innerHTML = '';
+      for (const inst of approved) select.add(new Option(`${inst.name} (${domainLabel(inst)})`, inst.id));
+      if (!approved.length) throw new Error('no approved institutions');
+      if (approved.some(inst => inst.id === session.institution)) select.value = session.institution;
+      select.disabled = false;
+
+      const selected = () => approved.find(inst => inst.id === select.value);
+      const render = () => {
+        const q = 'institution=' + encodeURIComponent(select.value);
+        dry.href = `/login?${q}&dry_run=true`;
+        renderButton(btn, selected(), `/login?${q}`, session);
+      };
+      select.addEventListener('change', render);
+      dry.addEventListener('click', e => { e.preventDefault(); showUrl(selected(), dry.href); });
+      btn.addEventListener('click', e => {
+        if (!btn.classList.contains('signout')) return; // plain "Log in" navigation
+        if (!session.logout_url) e.preventDefault(); // mock mode: no sign-out tab to open
+        fetch('/logout?local=true', { method: 'POST' })
+          .finally(() => { session = { logged_in: false }; render(); });
+      });
+      render();
     })
-    .catch(e => { document.getElementById('list').textContent = 'Failed to load institutions: ' + e; });
+    .catch(e => {
+      const select = document.getElementById('institution');
+      select.innerHTML = '';
+      select.add(new Option('Failed to load institutions: ' + e.message));
+    });
 </script>
 </body>
 </html>

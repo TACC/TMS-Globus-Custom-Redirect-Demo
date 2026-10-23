@@ -5,7 +5,8 @@
 //! OAuth2 login (tms_portal's TaccTapis provider).
 //!
 //! Routes (shaped like tms_portal's routes/login.rs):
-//!   GET /                       landing page (a single Login button to /demo)
+//!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
+//!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
 //!   GET /login/institutions     all institutions with their `approved` flag (from the mocked JSON)
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
@@ -45,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use settings::Settings;
 use tapis::TapisConfig;
 use test_idp::TestIdp;
+use tower_http::services::ServeDir;
 
 const STATE_COOKIE: &str = "idp_demo_state";
 const SESSION_COOKIE: &str = "idp_demo_session";
@@ -65,6 +67,11 @@ struct Session {
     /// The entry logged in with, so the page can turn its button into "Log out".
     institution: String,
     provider: Provider,
+    /// Who signed in, for the landing page's "Logged in as".
+    user: globus::UserInfo,
+    /// Signed in, but turned away (not approved, or the wrong identity). Kept
+    /// so logout can still revoke the token, but not reported as logged in.
+    rejected: bool,
     /// None in mock mode.
     token: Option<String>,
 }
@@ -182,6 +189,7 @@ async fn main() {
         .route("/mock-globus/approve", get(mock_approve))
         .route("/mock-globus/idp-callback", get(mock_idp_callback))
         .merge(test_idp::router(idp))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
         .merge(relay_router.unwrap_or_default());
 
@@ -229,7 +237,7 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn list_institutions(State(app): State<AppState>) -> Response {
-    // Unapproved entries are listed so the page can show them disabled;
+    // Unapproved entries are listed too (the page offers only approved ones);
     // /login still refuses them.
     tapis_style(StatusCode::OK, "Institutions.", json!(app.registry.all()))
 }
@@ -361,14 +369,6 @@ async fn callback(
         Err(e) => return (jar_cleared, page_error(StatusCode::BAD_GATEWAY, &e)).into_response(),
     };
 
-    // Keep the token even when the identity is rejected: it is still a live
-    // credential, and logout should revoke it.
-    let session = uuid::Uuid::new_v4().to_string();
-    app.sessions.lock().unwrap().insert(session.clone(), Session { institution: inst.id.clone(), provider: inst.provider, token });
-    let jar = jar_cleared.add(
-        Cookie::build((SESSION_COOKIE, session)).path("/").http_only(true).same_site(SameSite::Lax),
-    );
-
     // The approved list is enforced here, after sign-in, so a blocked
     // institution still shows who signed in and why they were filtered.
     let verdict = if !inst.approved {
@@ -378,8 +378,51 @@ async fn callback(
     } else {
         Verdict::NotAllowed
     };
-    let status = if verdict == Verdict::Welcome { StatusCode::OK } else { StatusCode::FORBIDDEN };
-    (jar, (status, Html(page_result(&inst, &user, verdict)))).into_response()
+
+    // A login over an earlier one (often a rejected login retried) replaces
+    // its session cookie, so revoke that token now: logout won't see it.
+    let earlier = jar.get(SESSION_COOKIE).and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
+    if let Some(earlier) = earlier {
+        revoke(&app, earlier, "login").await;
+    }
+
+    // Keep the token even when the identity is rejected: it is still a live
+    // credential, and logout should revoke it.
+    let session = uuid::Uuid::new_v4().to_string();
+    app.sessions.lock().unwrap().insert(
+        session.clone(),
+        Session {
+            institution: inst.id.clone(),
+            provider: inst.provider,
+            user: user.clone(),
+            rejected: verdict != Verdict::Welcome,
+            token,
+        },
+    );
+    let jar = jar_cleared.add(
+        Cookie::build((SESSION_COOKIE, session)).path("/").http_only(true).same_site(SameSite::Lax),
+    );
+    // A successful login goes back to the landing page, which shows who
+    // signed in; a rejected one gets the page explaining why.
+    if verdict == Verdict::Welcome {
+        return (jar, Redirect::to("/")).into_response();
+    }
+    (jar, (StatusCode::FORBIDDEN, Html(page_result(&inst, &user, verdict)))).into_response()
+}
+
+/// Revoke a session's token with its provider. Failures are only logged: the
+/// session is gone from the app either way.
+async fn revoke(app: &AppState, session: Session, context: &str) {
+    let Session { provider, token: Some(token), .. } = session else {
+        return; // mock mode: no real token
+    };
+    let revoked = match provider {
+        Provider::Globus => globus::revoke_token(&app.globus, &token).await,
+        Provider::TaccTapis => tapis::revoke_token(&app.tapis, &token).await,
+    };
+    if let Err(e) = revoked {
+        eprintln!("[{context}] {e}");
+    }
 }
 
 /// Hand Tapis's `code`/`state` (or `error`) to the normal callback on BASE_URL.
@@ -392,23 +435,30 @@ async fn tapis_callback_relay(State(app): State<AppState>, RawQuery(query): RawQ
 async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
     let session = jar
         .get(SESSION_COOKIE)
-        .and_then(|c| app.sessions.lock().unwrap().get(c.value()).map(|s| (s.institution.clone(), s.provider)));
+        .and_then(|c| app.sessions.lock().unwrap().get(c.value()).map(|s| (s.institution.clone(), s.provider, (!s.rejected).then(|| s.user.clone()))));
     // The provider's own sign-out page, which the page opens in a new tab. The
     // mock has no real Globus or Tapis session to sign out of.
     let logout_url = match &session {
         _ if app.globus.is_mock() => None,
-        Some((inst, Provider::Globus)) => Some(globus_logout_url(&app, inst)),
-        Some((_, Provider::TaccTapis)) => Some(tapis::logout_url(&app.tapis)),
+        Some((inst, Provider::Globus, _)) => Some(globus_logout_url(&app, inst)),
+        Some((_, Provider::TaccTapis, _)) => Some(tapis::logout_url(&app.tapis)),
         None => None,
     };
-    let (institution, provider) = session.unzip();
+    // A rejected login still reports its institution and logout_url, so the
+    // demo page can offer "Log out" to revoke its token.
+    let (institution, provider, user) = match session {
+        Some((i, p, u)) => (Some(i), Some(p), u),
+        None => (None, None, None),
+    };
     tapis_style(
         StatusCode::OK,
         "Login status.",
         json!({
-            "logged_in": institution.is_some(),
+            "logged_in": user.is_some(),
+            "rejected": institution.is_some() && user.is_none(),
             "institution": institution,
             "provider": provider,
+            "user": user,
             "logout_url": logout_url,
         }),
     )
@@ -461,14 +511,8 @@ async fn logout(State(app): State<AppState>, jar: CookieJar, Query(p): Query<Log
         .and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
     let provider = session.as_ref().map(|s| s.provider);
     let institution = session.as_ref().map(|s| s.institution.clone()).unwrap_or_default();
-    if let Some(Session { provider, token: Some(token), .. }) = session {
-        let revoked = match provider {
-            Provider::Globus => globus::revoke_token(&app.globus, &token).await,
-            Provider::TaccTapis => tapis::revoke_token(&app.tapis, &token).await,
-        };
-        if let Err(e) = revoked {
-            eprintln!("[logout] {e}");
-        }
+    if let Some(session) = session {
+        revoke(&app, session, "logout").await;
     }
     let jar = jar
         .remove(Cookie::build(SESSION_COOKIE).path("/"))
@@ -632,12 +676,12 @@ fn shell(title: &str, body: &str) -> String {
         r#"<!doctype html><html><head><meta charset="utf-8"><title>{}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- body{{font:16px/1.5 system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;color:#1d2330}}
+ body{{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:1.5rem auto;padding:0 .75rem;color:#1d2330}}
  table{{border-collapse:collapse;margin:1rem 0}} th,td{{text-align:left;padding:.3rem .8rem;border-bottom:1px solid #ddd}}
  code{{background:#f2f3f5;padding:.1rem .3rem;border-radius:3px}} .note{{color:#5b6475}}
  .ok{{color:#13703a}} .bad{{color:#a12121}} button{{font:inherit;padding:.4rem 1rem}} input{{font:inherit}}
  a.btn{{display:inline-block;background:#1f5fbf;color:#fff;padding:.35rem .9rem;border-radius:4px;text-decoration:none}}
-</style></head><body>{}<p><a class="btn" href="/demo">&larr; Back to start</a></p></body></html>"#,
+</style></head><body>{}<p><a class="btn" href="/">&larr; Back to start</a></p></body></html>"#,
         esc(title),
         body
     )

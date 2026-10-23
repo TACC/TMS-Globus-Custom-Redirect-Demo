@@ -3,7 +3,7 @@
 //! `Url::parse_with_params`, plus the one extra parameter: `redirect_idp_domain`.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub const GLOBUS_AUTHORIZE_URL: &str = "https://auth.globus.org/v2/oauth2/authorize";
@@ -55,7 +55,7 @@ struct TokenResponse {
 }
 
 /// Subset of the Globus OIDC userinfo response we care about.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     pub sub: String,
     pub preferred_username: String,

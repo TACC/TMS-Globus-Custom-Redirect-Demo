@@ -45,7 +45,7 @@ addition being `redirect_idp_domain`.
 Add `&dry_run=true` to `/login` to get the authorize URL as JSON instead of
 being redirected. For an unapproved institution it answers 403 with the
 blocked message, `"blocked": true`, and the authorize URL it would have used
-if approved (shown under the message in the "see URL" popup).
+if approved (shown under the message in the "Preview URL" popup).
 
 Two entries in the mock list are not institution redirects:
 
@@ -75,7 +75,9 @@ After a login, the **Log in** button of the entry you used becomes a red
 confirm), since both otherwise remember you: Globus then skips the
 `redirect_idp_domain` redirect, and Tapis skips its login form. It also
 revokes the token, ends the demo's session (`POST /logout?local=true`), and
-turns back into **Log in**. In mock mode no tab opens.
+turns back into **Log in**. In mock mode no tab opens. The landing page's
+**Log Out** works the same way and then reloads the landing page, since
+Globus's sign-out page does not redirect back by itself.
 
 For institution entries, ending the Globus session is not enough: the
 institution's own IdP still has a session and signs you straight back in.
@@ -247,7 +249,7 @@ With `GLOBUS_MOCK=true`, the authorize redirect points at a built-in
      `referer` row shows `auth.globus.org`, and the server logs
      `[test-idp] authorize`), sign in, and finish on "Welcome" with
      `jdoe@tacc.utexas.edu`.
-   - Fail: the Globus organization picker appears. Use `see URL` to confirm
+   - Fail: the Globus organization picker appears. Use `Preview URL` to confirm
      `redirect_idp_domain=tacc.utexas.edu` was sent.
    - Token problems: Globus's calls show up as `[test-idp] token …` lines.
 
