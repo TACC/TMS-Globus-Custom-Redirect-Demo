@@ -4,8 +4,8 @@ info:
   version: 0.3.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
-    One read-only endpoint serving the IdP data in
-    `mock/approved_institutions.json` (consumed by `src/institutions.rs`).
+    One read-only endpoint listing every institution a user can sign in
+    through, the IdP each one steers to, and whether login is approved.
 
     Responses use the Tapis-style envelope `{ status, message, version, result }`.
 
@@ -16,8 +16,8 @@ info:
 
     - The response is a [schema:ItemList](https://schema.org/ItemList) and each
       entry a [schema:Organization](https://schema.org/Organization). The
-      optional `type` fields carry those types into the graph; a context
-      cannot add them on its own.
+      `type` fields carry those types into the graph; a context cannot add
+      them on its own.
     - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
       login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
     - The envelope fields `status`, `message` and `version` describe the HTTP
@@ -42,8 +42,12 @@ externalDocs:
   url: https://pending.schema.org/docs/pending.home.html
 
 servers:
-  - url: http://localhost:8080
-    description: Local demo server (BASE_URL)
+  - url: "{base_url}"
+    description: Any deployment of this API.
+    variables:
+      base_url:
+        default: http://localhost:8080
+        description: Base URL of the deployment, with no trailing slash.
 
 # Public: the list holds no secrets, and the login page reads it before sign-in.
 security:
@@ -78,7 +82,7 @@ paths:
                 $ref: "#/components/schemas/InstitutionsResponse"
               examples:
                 mock:
-                  summary: mock/approved_institutions.json (abridged)
+                  summary: An abridged registry
                   value:
                     type: ItemList
                     status: success
@@ -173,6 +177,15 @@ components:
         An organization users can sign in through. Responses always include
         every field, writing `null` where a field does not apply.
       required: [type, id, name, provider, redirect_idp_domain, idp_logout_url, approved]
+      # Tapis logins do not go through Globus, so there is no IdP to steer to.
+      if:
+        properties:
+          provider:
+            const: tacc_tapis
+      then:
+        properties:
+          redirect_idp_domain:
+            type: "null"
       properties:
         type:
           const: Organization
@@ -194,11 +207,13 @@ components:
         redirect_idp_domain:
           type: [string, "null"]
           format: hostname
+          pattern: "^[a-z0-9.-]+$"
           description: |
-            Domain Globus associates with the institution's IdP, passed verbatim
-            as `redirect_idp_domain` on the authorize request. Login also
-            requires the returned username to end in `@<domain>`. `null` means a
-            plain login that accepts any identity.
+            Domain Globus associates with the institution's IdP, in lower case,
+            passed verbatim as `redirect_idp_domain` on the authorize request.
+            Login also requires the returned username to end in `@<domain>`.
+            `null` means a plain login that accepts any identity, and is
+            required when `provider` is `tacc_tapis`.
           examples: [uchicago.edu]
           x-schema-org: tms:redirectIdpDomain
           x-schema-org-related: [schema:AuthenticateAction]
@@ -210,7 +225,7 @@ components:
             Sign-out URL of the institution's own IdP. Globus does not pass
             `prompt=login` on to the IdP, so ending the IdP's session is the
             only way to make the next login ask for a password again.
-            `/logout/idp` redirects the browser here, so it must be `https`.
+            Clients redirect the browser here at sign-out, so it must be `https`.
           examples: [https://uchicago.okta.com/login/signout]
           x-schema-org: tms:idpLogoutUrl
         approved:
