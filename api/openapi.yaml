@@ -15,10 +15,13 @@ info:
     holds the same mapping as a JSON-LD context.
 
     - The response is a [schema:ItemList](https://schema.org/ItemList) and each
-      entry a [schema:Organization](https://schema.org/Organization).
+      entry a [schema:Organization](https://schema.org/Organization). The
+      optional `type` fields carry those types into the graph; a context
+      cannot add them on its own.
     - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
-      login provider) use the `tms:` vocabulary (`urn:tacc:tms:vocab:`), a
-      placeholder until TMS publishes its own.
+      login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
+    - The envelope fields `status`, `message` and `version` describe the HTTP
+      response, not the institutions, so the context leaves them out of the graph.
 
     `x-schema-org-related` names the schema.org terms closest in meaning,
     including ones from [pending.schema.org](https://pending.schema.org/docs/pending.home.html).
@@ -100,6 +103,20 @@ paths:
                         name: Example University (pending review)
                         redirect_idp_domain: example.edu
                         approved: false
+                typed:
+                  summary: With JSON-LD types
+                  value:
+                    type: ItemList
+                    status: success
+                    message: Approved institutions retrieved.
+                    result:
+                      - type: Organization
+                        id: uchicago
+                        name: University of Chicago
+                        provider: globus
+                        redirect_idp_domain: uchicago.edu
+                        idp_logout_url: https://uchicago.okta.com/login/signout
+                        approved: true
         "500":
           description: The registry could not be read.
           content:
@@ -116,18 +133,19 @@ components:
         "@type": schema:ItemList
       required: [status, message, result]
       properties:
+        type:
+          const: ItemList
+          description: JSON-LD type (aliased to `@type`).
+          x-schema-org: "@type"
         status:
           const: success
-          x-schema-org: tms:status
         message:
           type: string
           description: Human-readable summary of the response.
-          x-schema-org: schema:description
         version:
           type: string
           description: Version of the institution list. Present in the mock file; the demo server omits it.
           examples: [mock-0.1.0]
-          x-schema-org: tms:listVersion
         result:
           type: array
           items:
@@ -140,10 +158,8 @@ components:
       properties:
         status:
           const: error
-          x-schema-org: tms:status
         message:
           type: string
-          x-schema-org: schema:description
         result:
           type: "null"
 
@@ -154,6 +170,10 @@ components:
         "@type": schema:Organization
       required: [id, name, approved]
       properties:
+        type:
+          const: Organization
+          description: JSON-LD type (aliased to `@type`).
+          x-schema-org: "@type"
         id:
           type: string
           pattern: "^[a-z0-9_]+$"
