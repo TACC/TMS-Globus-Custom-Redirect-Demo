@@ -1,0 +1,19 @@
+# Lint config for api/openapi.yaml: `npx @redocly/cli@2.60.0 lint`
+extends:
+  - recommended
+
+apis:
+  institutions:
+    root: api/openapi.yaml
+
+rules:
+  # Objects are open (clients must ignore unknown fields), so examples are
+  # checked that way too. Strict checking also misreads the Institution
+  # schema's if/then as forbidding every field the `then` branch leaves out.
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: true
+  # Neither operation takes input a client could get wrong.
+  operation-4xx-response: off
+  # Proprietary: there is no SPDX identifier or public license URL to give.
+  info-license-strict: off

@@ -22,3 +22,8 @@ tower-http = { version = "0.7.1", features = ["fs"] }
 # RSA key generation is very slow unoptimized; keep debug builds usable.
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
+
+[dev-dependencies]
+jsonschema = "0.60.1"
+serde_yaml = "0.9.34"
+tower = { version = "0.5.3", features = ["util"] }

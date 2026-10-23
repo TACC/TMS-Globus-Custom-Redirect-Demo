@@ -8,8 +8,8 @@
 //!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
 //!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
-//!   GET /login/institutions     the approved institutions (from the mocked JSON), with a Link
-//!                               header naming the JSON-LD context
+//!   GET /login/institutions     the approved institutions (from the mocked registry), with a Link
+//!                               header naming the JSON-LD context (see institutions_api.rs)
 //!   GET /api/institutions.context.jsonld  that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
@@ -26,13 +26,14 @@
 
 mod globus;
 mod institutions;
+mod institutions_api;
 mod settings;
 mod tapis;
 mod test_idp;
 
 use axum::{
     extract::{rejection::QueryRejection, Query, RawQuery, State},
-    http::{header, StatusCode},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -40,7 +41,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
-use institutions::{identity_matches, is_valid_id, Institution, ListType, Provider, Registry};
+use institutions::{identity_matches, is_valid_id, Institution, Provider, Registry};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -52,7 +53,6 @@ use tower_http::services::ServeDir;
 
 const STATE_COOKIE: &str = "idp_demo_state";
 const SESSION_COOKIE: &str = "idp_demo_session";
-const CONTEXT_PATH: &str = "/api/institutions.context.jsonld";
 
 #[derive(Clone)]
 struct AppState {
@@ -151,10 +151,11 @@ async fn main() {
         idp.issuer, idp.domain, idp.client_id
     );
 
+    let registry = Arc::new(registry);
     let state = AppState {
         globus: Arc::new(globus),
         tapis: Arc::new(tapis),
-        registry: Arc::new(registry),
+        registry: registry.clone(),
         idp: idp.clone(),
         base_url: base_url.clone(),
         sessions: Arc::default(),
@@ -182,8 +183,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(landing))
         .route("/demo", get(index))
-        .route("/login/institutions", get(list_institutions))
-        .route(CONTEXT_PATH, get(institutions_context))
+        .merge(institutions_api::router(registry, base_url.clone()))
         .route("/login", get(login))
         .route("/login/callback", get(callback))
         .route("/login/status", get(login_status))
@@ -238,39 +238,6 @@ async fn landing() -> Html<&'static str> {
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
-}
-
-async fn list_institutions(State(app): State<AppState>) -> Response {
-    // Public, so unapproved entries stay out of it; /login still knows them
-    // and answers with the Filtered page.
-    // `type` makes the list a schema:ItemList under api/institutions.context.jsonld,
-    // and the Link header tells JSON-LD processors where that context is.
-    let link = format!(
-        r#"<{}{CONTEXT_PATH}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#,
-        app.base_url
-    );
-    (
-        [(header::LINK, link)],
-        Json(json!({
-            "type": ListType::ItemList,
-            "status": "success",
-            "message": "Approved institutions.",
-            "result": app.registry.approved(),
-        })),
-    )
-        .into_response()
-}
-
-/// The JSON-LD context named by /login/institutions' Link header. Open to any
-/// origin, since JSON-LD processors in other sites' pages fetch it too.
-async fn institutions_context() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/ld+json"),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-        ],
-        include_str!("../api/institutions.context.jsonld"),
-    )
 }
 
 #[derive(Deserialize)]

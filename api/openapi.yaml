@@ -11,13 +11,15 @@ info:
 
     ### schema.org mapping
     The payload stays plain, flat JSON. Each schema and field names the
-    linked-data term it means with `x-schema-org`; `api/institutions.context.jsonld`
-    holds the same mapping as a JSON-LD context.
+    linked-data term it means with `x-schema-org`; the JSON-LD context served at
+    `GET /api/institutions.context.jsonld` holds the same mapping.
 
     - The response is a [schema:ItemList](https://schema.org/ItemList) and each
       entry a [schema:Organization](https://schema.org/Organization). The
       `type` fields carry those types into the graph; a context cannot add
       them on its own.
+    - The list links each entry directly with `schema:itemListElement`. The
+      order of `result` is part of the JSON only; the graph does not record it.
     - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
       login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
     - The envelope fields `status`, `message` and `version` describe the HTTP
@@ -35,6 +37,10 @@ info:
 
     schema.org, pending included, has no term for an IdP domain or a sign-out
     URL, so those stay in `tms:`.
+
+    ### Compatibility
+    Later minor versions may add fields to any object. Clients must ignore
+    fields they do not recognise.
   license:
     name: Proprietary
 externalDocs:
@@ -46,7 +52,7 @@ servers:
     description: Any deployment of this API.
     variables:
       base_url:
-        default: http://localhost:8080
+        default: https://tms.example.org
         description: Base URL of the deployment, with no trailing slash.
 
 # Public: the list holds no secrets, and the login page reads it before sign-in.
@@ -66,11 +72,28 @@ paths:
       description: |
         Returns approved entries only, in registry order. The list is public,
         so unapproved entries (for example, ones pending review) never appear
-        in it; login still refuses them if asked for by id.
+        in it.
+
+        It is meant for the login page on the same origin, so it sends no
+        CORS headers. Clients revalidate on every use (`Cache-Control: no-cache`);
+        when the data has a `version`, it doubles as the `ETag`, and a matching
+        `If-None-Match` gets `304 Not Modified`.
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          description: An `ETag` from an earlier response.
+          schema:
+            type: string
+          example: '"2026-10-23.1"'
       responses:
         "200":
           description: The approved institutions.
           headers:
+            Cache-Control:
+              $ref: "#/components/headers/ListCacheControl"
+            ETag:
+              $ref: "#/components/headers/ETag"
             Link:
               description: |
                 Points JSON-LD processors at the context served by
@@ -79,19 +102,19 @@ paths:
               required: true
               schema:
                 type: string
-              example: <http://localhost:8080/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+              example: <https://tms.example.org/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstitutionsResponse"
               examples:
-                mock:
-                  summary: An abridged registry
+                approved:
+                  summary: An abridged list
                   value:
                     type: ItemList
                     status: success
                     message: Approved institutions.
-                    version: mock-0.1.0
+                    version: "2026-10-23.1"
                     result:
                       - type: Organization
                         id: globus
@@ -114,6 +137,13 @@ paths:
                         redirect_idp_domain: null
                         idp_logout_url: null
                         approved: true
+        "304":
+          description: The list has not changed since the `ETag` in `If-None-Match`.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/ListCacheControl"
+            ETag:
+              $ref: "#/components/headers/ETag"
         "500":
           description: The registry could not be read.
           content:
@@ -129,7 +159,8 @@ paths:
       description: |
         Maps the list's plain JSON fields to schema.org and `tms:` terms.
         Public and open to any origin (`Access-Control-Allow-Origin: *`), so
-        JSON-LD processors on other sites can fetch it.
+        JSON-LD processors on other sites can fetch it. It changes only with
+        this API's version, so it may be cached for a day.
       responses:
         "200":
           description: The JSON-LD context document.
@@ -138,17 +169,41 @@ paths:
               required: true
               schema:
                 const: "*"
+            Cache-Control:
+              required: true
+              schema:
+                const: public, max-age=86400
           content:
             application/ld+json:
               schema:
                 type: object
                 required: ["@context"]
+                properties:
+                  "@context":
+                    type: object
 
 components:
+  headers:
+    ListCacheControl:
+      description: Clients must revalidate before reusing a stored copy.
+      required: true
+      schema:
+        const: no-cache
+    ETag:
+      description: |
+        The response's `version` in double quotes. Present exactly when
+        `version` is.
+      schema:
+        type: string
+        pattern: '^"[!#-~]{1,64}"$'
+      example: '"2026-10-23.1"'
+
   schemas:
     InstitutionsResponse:
       type: object
-      description: Tapis-style envelope around the institution list.
+      description: |
+        Tapis-style envelope around the institution list. Clients must ignore
+        fields they do not recognise.
       x-schema-org:
         "@type": schema:ItemList
       required: [type, status, message, result]
@@ -166,8 +221,13 @@ components:
           type: string
           description: |
             Revision of the institution data (not of this API), so a client can
-            tell when the list has changed. Optional; readers must not require it.
-          examples: [mock-0.1.0]
+            tell when the list has changed. Opaque; it is also the response's
+            `ETag`, so it is limited to characters an `ETag` allows. Optional;
+            readers must not require it.
+          minLength: 1
+          maxLength: 64
+          pattern: "^[!#-~]+$"
+          examples: ["2026-10-23.1"]
         result:
           type: array
           description: |
@@ -195,7 +255,8 @@ components:
         "@type": schema:Organization
       description: |
         An organization users can sign in through. Responses always include
-        every field, writing `null` where a field does not apply.
+        every field, writing `null` where a field does not apply. Clients must
+        ignore fields they do not recognise.
       required: [type, id, name, provider, redirect_idp_domain, idp_logout_url, approved]
       # Tapis logins do not go through Globus, so there is no IdP to steer to.
       if:
@@ -213,12 +274,15 @@ components:
           x-schema-org: "@type"
         id:
           type: string
+          maxLength: 64
           pattern: "^[a-z0-9_]+$"
           description: Stable id the UI uses to pick the institution at login.
           examples: [uchicago]
           x-schema-org: schema:identifier
         name:
           type: string
+          minLength: 1
+          maxLength: 256
           description: Display name.
           examples: [University of Chicago]
           x-schema-org: schema:name
@@ -227,7 +291,10 @@ components:
         redirect_idp_domain:
           type: [string, "null"]
           format: hostname
-          pattern: "^[a-z0-9.-]+$"
+          maxLength: 253
+          # Two or more dot-separated labels of lower-case letters, digits and
+          # inner hyphens, each 1-63 characters.
+          pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
           description: |
             Domain Globus associates with the institution's IdP, in lower case,
             passed verbatim as `redirect_idp_domain` on the authorize request.
@@ -240,6 +307,7 @@ components:
         idp_logout_url:
           type: [string, "null"]
           format: uri
+          maxLength: 2048
           pattern: "^https://"
           description: |
             Sign-out URL of the institution's own IdP. Globus does not pass
@@ -249,11 +317,10 @@ components:
           examples: [https://uchicago.okta.com/login/signout]
           x-schema-org: tms:idpLogoutUrl
         approved:
-          type: boolean
+          const: true
           description: |
-            Whether login may proceed for this institution. The schema allows
-            `false` so the same shape fits the full registry, but the public
-            listing leaves unapproved entries out.
+            Whether login may proceed for this institution. Always `true`,
+            since the listing leaves unapproved entries out.
           x-schema-org: tms:approved
           x-schema-org-related: [schema:Certification, schema:certificationStatus]
 

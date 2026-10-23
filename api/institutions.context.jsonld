@@ -11,7 +11,7 @@
     "status": null,
     "message": null,
     "version": null,
-    "result": { "@id": "schema:itemListElement", "@container": "@list" },
+    "result": "schema:itemListElement",
 
     "id": "schema:identifier",
     "name": "schema:name",

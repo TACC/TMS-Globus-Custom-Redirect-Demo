@@ -15,9 +15,13 @@ addition being `redirect_idp_domain`.
 
 ## What it shows
 
-1. `GET /login/institutions` serves the approved entries of
-   `mock/approved_institutions.json` (Tapis-style envelope:
-   `status / message / version / result`). The list is public, so
+1. `GET /login/institutions` serves the approved entries of the registry
+   file `mock/approved_institutions.json` (`{ version, institutions }`) in a
+   Tapis-style envelope, `type / status / message / version / result`, as
+   specified in `api/openapi.yaml`. The registry is checked against the
+   spec's rules when it loads (unique ids, lower-case domains, `https`
+   sign-out URLs, no domain for Tapis), so a bad entry stops the server
+   instead of being served. The list is public, so
    `approved: false` entries are left out of it. They stay in the registry:
    `/login?institution=<id>` for one of them does not start a login but
    answers with a **Filtered** page (laid out like **Welcome**, with the
@@ -300,9 +304,21 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 
 ```bash
 cargo test
+npx @redocly/cli@2.60.0 lint                              # the spec, configured by redocly.yaml
+pip install pyld==3.3.0 pyyaml==6.0.3 && python scripts/check_jsonld.py
 ```
 
-Covers: only known institutions can be looked up, the authorize URL carries
+CI (`.github/workflows/ci.yml`) runs all three.
+
+The API contract tests in `src/institutions_api.rs` call both public
+endpoints and validate the responses against the schemas in
+`api/openapi.yaml`, check their headers (`Link`, `Cache-Control`, `ETag` and
+`304 Not Modified`, CORS on the context), and check that every field the spec
+maps with `x-schema-org` maps to the same term in the JSON-LD context.
+`scripts/check_jsonld.py` expands the spec's example with that context and
+checks the resulting RDF.
+
+The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike
 domains such as `evil-uchicago.edu`), and for the test IdP: JWT signatures
 verify only against its own JWKS, codes are single-use and bound to
