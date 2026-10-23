@@ -5,7 +5,8 @@
 //! OAuth2 login (tms_portal's TaccTapis provider).
 //!
 //! Routes (shaped like tms_portal's routes/login.rs):
-//!   GET /                       landing page (a single Login button to /demo)
+//!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
+//!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
 //!   GET /login/institutions     all institutions with their `approved` flag (from the mocked JSON)
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
@@ -45,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use settings::Settings;
 use tapis::TapisConfig;
 use test_idp::TestIdp;
+use tower_http::services::ServeDir;
 
 const STATE_COOKIE: &str = "idp_demo_state";
 const SESSION_COOKIE: &str = "idp_demo_session";
@@ -182,6 +184,7 @@ async fn main() {
         .route("/mock-globus/approve", get(mock_approve))
         .route("/mock-globus/idp-callback", get(mock_idp_callback))
         .merge(test_idp::router(idp))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
         .merge(relay_router.unwrap_or_default());
 
@@ -229,7 +232,7 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn list_institutions(State(app): State<AppState>) -> Response {
-    // Unapproved entries are listed so the page can show them disabled;
+    // Unapproved entries are listed too (the page offers only approved ones);
     // /login still refuses them.
     tapis_style(StatusCode::OK, "Institutions.", json!(app.registry.all()))
 }

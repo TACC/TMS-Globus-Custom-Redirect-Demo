@@ -1,16 +1,76 @@
 <!doctype html>
-<html>
+<html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Login to Globus</title>
-<style>
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1d2330; }
-  button { font: inherit; background: #1f5fbf; color: #fff; border: 0; padding: .45rem 1.2rem; border-radius: 4px; cursor: pointer; }
-</style>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SGW Institution Login Demo</title>
+    <link rel="icon" href="/static/favicon.png" type="image/png">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+    <link rel="stylesheet" href="/static/app.css">
+    <style>
+        .auth-form { margin: 0; }
+        [hidden] { display: none !important; }
+    </style>
 </head>
+
 <body>
-  <h1>Login to Globus</h1>
-  <form action="/demo" method="get"><button>Login</button></form>
+
+    <div class="logo-bar">
+        <div class="logo">
+            <div class="logo-mark">SGW</div>
+            <div class="logo-text">Science Gateway</div>
+        </div>
+    </div>
+
+    <nav class="navbar">
+        <div class="nav-left">
+            <a class="nav-btn" href="/">Home</a>
+            <a class="nav-btn" href="/demo">Institutions</a>
+        </div>
+        <a class="auth-btn" id="login-btn" href="/demo">Log in</a>
+        <!-- /logout is a POST: it revokes the token, then sends you through Globus sign-out back here. -->
+        <form class="auth-form" id="logout-form" action="/logout" method="post" hidden>
+            <button class="auth-btn">Log Out</button>
+        </form>
+    </nav>
+
+    <div class="main">
+        <h1>Globus Institution Login Demo</h1>
+        <div id="authenticated" hidden>
+            <p>Logged in via <b id="institution"></b> (<span id="provider"></span>).</p>
+            <p class="tms-link">
+                <a class="tms-btn"
+                    href="https://tms-auth-service.tacc.cloud/login?idp_id=globus_idp&redirect_uri=https://tms-auth-service.tacc.cloud/">Link
+                    Resources via TMS</a>
+            </p>
+        </div>
+        <div id="anonymous">
+            <p>You are not authenticated.</p>
+            <p>Please Log In</p>
+        </div>
+    </div>
+
+    <div>
+        <img class="content-image" width="800" height="480" alt="Built by science banner" src="/static/assets/built-by-science-banner.jpg">
+    </div>
+    <p class="image-caption">For Science!</p>
+
+    <script>
+        fetch('/login/status')
+            .then(r => r.json())
+            .then(({ result }) => {
+                if (!result?.logged_in) return;
+                document.getElementById('institution').textContent = result.institution;
+                document.getElementById('provider').textContent = result.provider;
+                document.getElementById('authenticated').hidden = false;
+                document.getElementById('anonymous').hidden = true;
+                document.getElementById('logout-form').hidden = false;
+                document.getElementById('login-btn').hidden = true;
+            })
+            .catch(() => {}); // stay on the logged-out view
+    </script>
 </body>
+
 </html>
