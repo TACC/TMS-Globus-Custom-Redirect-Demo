@@ -13,5 +13,3 @@ rules:
   no-invalid-media-type-examples:
     severity: error
     allowAdditionalProperties: true
-  # Proprietary: there is no SPDX identifier or public license URL to give.
-  info-license-strict: off

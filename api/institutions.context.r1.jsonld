@@ -1,6 +1,5 @@
 {
   "@context": {
-    "@version": 1.1,
     "schema": "https://schema.org/",
     "tms": "https://tacc.utexas.edu/ns/tms#",
 
@@ -10,7 +9,7 @@
 
     "status": null,
     "message": null,
-    "version": null,
+    "data_version": null,
     "result": "schema:itemListElement",
 
     "id": "schema:identifier",

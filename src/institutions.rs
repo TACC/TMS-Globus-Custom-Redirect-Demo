@@ -2,7 +2,7 @@
 //!
 //! In production this list would come from TMS (e.g. a table next to
 //! `identity_providers` / `allowed_redirects`) or an admin API. Here it is
-//! read from a mocked registry file, `{ "version", "institutions": [...] }`,
+//! read from a mocked registry file, `{ "data_version", "institutions": [...] }`,
 //! holding approved and unapproved entries alike. `institutions_api` serves the
 //! approved ones in the shape api/openapi.yaml defines.
 
@@ -61,15 +61,15 @@ pub struct Institution {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryFile {
-    /// Revision of the data; served as the list's `version` and `ETag`.
+    /// Revision of the data; served as the list's `data_version` and `ETag`.
     #[serde(default)]
-    version: Option<String>,
+    data_version: Option<String>,
     institutions: Vec<Institution>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Registry {
-    version: Option<String>,
+    data_version: Option<String>,
     institutions: Vec<Institution>,
 }
 
@@ -78,7 +78,7 @@ impl Registry {
     /// api/openapi.yaml sets, so the listing never serves an invalid entry.
     pub fn from_json(json: &str) -> Result<Self, String> {
         let file: RegistryFile = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        let reg = Self { version: file.version, institutions: file.institutions };
+        let reg = Self { data_version: file.data_version, institutions: file.institutions };
         reg.validate()?;
         Ok(reg)
     }
@@ -89,9 +89,9 @@ impl Registry {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if let Some(v) = &self.version {
-            if !is_valid_version(v) {
-                return Err(format!("version {v:?} must be 1-64 visible ASCII characters other than '\"' and ','"));
+        if let Some(v) = &self.data_version {
+            if !is_valid_data_version(v) {
+                return Err(format!("data_version {v:?} must be 1-64 visible ASCII characters other than '\"' and ','"));
             }
         }
         let mut seen = HashSet::new();
@@ -116,16 +116,16 @@ impl Registry {
                 _ => {}
             }
             if let Some(u) = &i.idp_logout_url {
-                if u.len() > 2048 || !u.starts_with("https://") || u.contains(char::is_whitespace) || url::Url::parse(u).is_err() {
-                    return Err(format!("{id}: idp_logout_url {u:?} must be an https URL of at most 2048 bytes, without white space"));
+                if !is_valid_sign_out_url(u) {
+                    return Err(format!("{id}: idp_logout_url {u:?} must be an https URI (RFC 3986) of at most 2048 characters"));
                 }
             }
         }
         Ok(())
     }
 
-    pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
+    pub fn data_version(&self) -> Option<&str> {
+        self.data_version.as_deref()
     }
 
     pub fn approved(&self) -> Vec<Institution> {
@@ -202,10 +202,48 @@ fn is_valid_domain(d: &str) -> bool {
     d.len() <= 253 && d.split('.').count() >= 2 && d.split('.').all(label_ok) && tld_ok
 }
 
-/// The spec's `version` pattern (1-64 visible ASCII characters other than `"`
+/// The spec's `idp_logout_url` rules: `format: uri` (RFC 3986, so ASCII only,
+/// well-formed percent-encodings, and `[` `]` only around an IP-literal host),
+/// `https` with a non-empty host, and at most 2048 characters.
+fn is_valid_sign_out_url(u: &str) -> bool {
+    // pchar without pct-encoded: unreserved / sub-delims / ":" / "@".
+    let pchar = |c: u8| c.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@".contains(&c);
+    // Every byte allowed by `ok`, and every `%` followed by two hex digits.
+    let chars_ok = |s: &str, ok: &dyn Fn(u8) -> bool| {
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' {
+                if !(b.get(i + 1).is_some_and(u8::is_ascii_hexdigit) && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit)) {
+                    return false;
+                }
+                i += 3;
+            } else if ok(b[i]) {
+                i += 1;
+            } else {
+                return false;
+            }
+        }
+        true
+    };
+    let Some(rest) = u.strip_prefix("https://") else { return false };
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let ip_literal = |c: u8| c == b'[' || c == b']';
+    u.len() <= 2048
+        && !authority.is_empty()
+        && chars_ok(authority, &|c| pchar(c) || ip_literal(c))
+        && chars_ok(path, &|c| pchar(c) || c == b'/')
+        && chars_ok(query, &|c| pchar(c) || c == b'/' || c == b'?')
+        && chars_ok(fragment, &|c| pchar(c) || c == b'/' || c == b'?')
+        && url::Url::parse(u).is_ok_and(|p| p.host_str().is_some_and(|h| !h.is_empty()))
+}
+
+/// The spec's `data_version` pattern (1-64 visible ASCII characters other than `"`
 /// and `,`): usable inside a quoted `ETag`, and never split apart by the commas
 /// that separate tags in `If-None-Match`.
-fn is_valid_version(v: &str) -> bool {
+fn is_valid_data_version(v: &str) -> bool {
     (1..=64).contains(&v.len()) && v.bytes().all(|b| (b'!'..=b'~').contains(&b) && b != b'"' && b != b',')
 }
 
@@ -318,10 +356,12 @@ mod tests {
     #[test]
     fn version_is_optional_and_etag_safe() {
         let unversioned = r#"{"institutions":[]}"#;
-        assert_eq!(Registry::from_json(unversioned).unwrap().version(), None);
-        assert_eq!(Registry::from_json(MOCK).unwrap().version(), Some("mock-0.1.0"));
+        assert_eq!(Registry::from_json(unversioned).unwrap().data_version(), None);
+        assert_eq!(Registry::from_json(MOCK).unwrap().data_version(), Some("mock-0.1.0"));
+        // The pre-0.8 key is refused, so a stale file cannot silently lose its revision.
+        assert!(Registry::from_json(r#"{"version":"x","institutions":[]}"#).is_err());
         for bad in ["", "a b", "a\"b", "a,b", &"v".repeat(65)] {
-            let json = serde_json::json!({ "version": bad, "institutions": [] }).to_string();
+            let json = serde_json::json!({ "data_version": bad, "institutions": [] }).to_string();
             assert!(Registry::from_json(&json).is_err(), "{bad:?}");
         }
     }
@@ -359,7 +399,25 @@ mod tests {
     #[test]
     fn sign_out_urls_must_be_https() {
         assert!(with("idp_logout_url", "https://idp.a.edu/logout".into()).is_ok());
-        for bad in ["http://idp.a.edu/logout", "https://", "idp.a.edu/logout", "https://idp.a.edu/log out"] {
+        for good in ["https://idp.a.edu/a%20b?x=1&y=/z?#frag/?", "https://idp.a.edu", "https://idp.a.edu:8443/logout"] {
+            assert!(with("idp_logout_url", good.into()).is_ok(), "{good:?}");
+        }
+        // Non-ASCII, brackets outside the host, a second `#` and a broken
+        // percent-encoding are not RFC 3986 URIs, though url::Url parses them.
+        let long = format!("https://idp.a.edu/{}", "a".repeat(2048));
+        for bad in [
+            "http://idp.a.edu/logout",
+            "https://",
+            "idp.a.edu/logout",
+            "https://idp.a.edu/log out",
+            "https://a.edu/\u{fc}[x]",
+            "https://a.edu/x[1]",
+            "https://a.edu/a#b#c",
+            "https://a.edu/%zz",
+            "https://a.edu/%2",
+            "https://a.edu/a|b",
+            long.as_str(),
+        ] {
             assert!(with("idp_logout_url", bad.into()).is_err(), "{bad:?}");
         }
         let reg = Registry::from_json(MOCK).unwrap();
@@ -375,9 +433,9 @@ mod tests {
         let source = RegistrySource::File(path.to_str().unwrap().into());
         assert!(matches!(source.current(), Err(RegistryError::Unavailable(_))));
         std::fs::write(&path, MOCK).unwrap();
-        assert_eq!(source.current().unwrap().version(), Some("mock-0.1.0"));
+        assert_eq!(source.current().unwrap().data_version(), Some("mock-0.1.0"));
         std::fs::write(&path, MOCK.replace("mock-0.1.0", "mock-0.1.1")).unwrap();
-        assert_eq!(source.current().unwrap().version(), Some("mock-0.1.1"));
+        assert_eq!(source.current().unwrap().data_version(), Some("mock-0.1.1"));
         std::fs::write(&path, "{").unwrap();
         assert!(matches!(source.current(), Err(RegistryError::Invalid(_))));
         std::fs::remove_file(&path).unwrap();

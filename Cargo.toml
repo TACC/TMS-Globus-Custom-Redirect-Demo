@@ -2,6 +2,7 @@
 name = "idp_redirect_demo"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 description = "Minimal demo of Globus Auth redirect_idp_domain driven by an approved-institutions list"
 
 [dependencies]

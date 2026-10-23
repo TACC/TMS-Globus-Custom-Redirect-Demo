@@ -35,6 +35,8 @@ for cors in "" "*" "https://portal.example.org,http://localhost:3000"; do
   fi
 
   echo "== CORS setting: '${cors}'"
+  # An extra header on every request, as a gateway's credentials would be.
+  export API_EXTRA_HEADERS='{"X-Conformance-Run": "demo"}'
   API_BASE_URL="$base" API_CORS="$cors" PYTHONDONTWRITEBYTECODE=1 \
     "$python" -m pytest -q -p no:cacheprovider conformance
   "$python" scripts/check_jsonld.py --url "$base"

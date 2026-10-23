@@ -11,7 +11,7 @@
 //!   GET /api/v1/institutions    the approved institutions (from the mocked registry), with a Link
 //!                               header naming the JSON-LD context (see institutions_api.rs)
 //!   OPTIONS /api/v1/institutions  CORS preflight for that list (see CORS_ALLOWED_ORIGINS)
-//!   GET /api/v1/institutions.context.r<n>.jsonld  each revision of that JSON-LD context
+//!   GET /api/v1/contexts/institutions/<n>  each revision of that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks

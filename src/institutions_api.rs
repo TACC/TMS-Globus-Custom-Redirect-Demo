@@ -1,29 +1,37 @@
 //! The public institutions API, as specified in api/openapi.yaml:
 //!
-//!   GET     /api/v1/institutions                      the approved institutions
-//!   OPTIONS /api/v1/institutions                      CORS preflight for that list
-//!   GET     /api/v1/institutions.context.r<n>.jsonld  each revision of the JSON-LD context for that list
+//!   GET     /api/v1/institutions                  the approved institutions
+//!   OPTIONS /api/v1/institutions                  CORS preflight for that list
+//!   GET     /api/v1/contexts/institutions/<n>     each revision of the JSON-LD context for that list
 //!
-//! Other methods get a 405 and other paths under /api/v1 a 404, both as
-//! RFC 9457 problems. Kept apart from the demo's login flow so it depends
-//! only on the registry, the deployment's base URL and its CORS setting.
+//! Other methods on those paths get a 405, as an RFC 9457 problem; every
+//! response carries `X-Content-Type-Options: nosniff`. Kept apart from the
+//! demo's login flow so it depends only on the registry, the deployment's
+//! base URL and its CORS setting.
 
 use crate::institutions::{ListType, RegistryError, RegistrySource};
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::map_response,
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::get,
     Json, Router,
 };
 use serde_json::json;
 
 pub const LIST_PATH: &str = "/api/v1/institutions";
+/// The route of every context revision.
+const CONTEXT_ROUTE: &str = "/api/v1/contexts/institutions/{revision}";
 /// The `Allow` header of the list's preflight and 405s.
 const LIST_ALLOW: &str = "GET, HEAD, OPTIONS";
+/// The `Allow` header of a context's 405s.
+const CONTEXT_ALLOW: &str = "GET, HEAD";
 /// The response headers cross-origin scripts may read from the list.
 const EXPOSE_HEADERS: &str = "ETag, Link, Retry-After";
 const CONTEXT_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+/// Seconds a browser may reuse the list's preflight answer.
+const PREFLIGHT_MAX_AGE: &str = "7200";
 /// One published revision of the JSON-LD context: api/institutions.context.r<n>.jsonld,
 /// served at `context_path(n)`.
 pub struct ContextRevision {
@@ -34,15 +42,12 @@ pub struct ContextRevision {
 /// Every published revision, oldest first. A published revision never
 /// changes, so a changed context is a new row (and file) for the next
 /// revision; earlier rows stay, so their URLs keep working, and the list's
-/// Link header moves to the last one. The tests pin each row's content.
-pub const CONTEXTS: &[ContextRevision] = &[
-    ContextRevision { revision: 1, body: include_str!("../api/institutions.context.r1.jsonld") },
-    // r1 without `@version: 1.1`, which it did not need.
-    ContextRevision { revision: 2, body: include_str!("../api/institutions.context.r2.jsonld") },
-];
+/// Link header moves to the last one. The tests pin each row's content to
+/// the spec's `x-context-sha256`.
+pub const CONTEXTS: &[ContextRevision] = &[ContextRevision { revision: 1, body: include_str!("../api/institutions.context.r1.jsonld") }];
 
 pub fn context_path(revision: u32) -> String {
-    format!("/api/v1/institutions.context.r{revision}.jsonld")
+    format!("/api/v1/contexts/institutions/{revision}")
 }
 
 /// The revision the list's Link header names.
@@ -50,10 +55,9 @@ fn latest_context() -> &'static ContextRevision {
     CONTEXTS.last().expect("at least one context revision")
 }
 
-/// The published revision a file name under /api/v1 names, if any. The
-/// number is decimal without leading zeros, so each revision has one URL.
-fn context_revision(file: &str) -> Option<&'static ContextRevision> {
-    let digits = file.strip_prefix("institutions.context.r")?.strip_suffix(".jsonld")?;
+/// The published revision a path segment names, if any. The number is
+/// decimal without leading zeros, so each revision has one URL.
+fn context_revision(digits: &str) -> Option<&'static ContextRevision> {
     let revision = digits.parse::<u32>().ok().filter(|n| n.to_string() == digits)?;
     CONTEXTS.iter().find(|c| c.revision == revision)
 }
@@ -130,12 +134,15 @@ struct ApiState {
 pub fn router<S: Clone + Send + Sync + 'static>(registry: RegistrySource, base_url: String, cors: Cors) -> Router<S> {
     Router::new()
         .route(LIST_PATH, get(list_institutions).options(preflight_institutions).fallback(list_method_not_allowed))
-        // The contexts, and a 404 for every other path in the API's namespace,
-        // the namespace itself included (`{*path}` needs a non-empty tail).
-        .route("/api/v1/{*path}", any(api_path))
-        .route("/api/v1", any(api_root))
-        .route("/api/v1/", any(api_root))
+        .route(CONTEXT_ROUTE, get(get_context).fallback(context_method_not_allowed))
+        .layer(map_response(no_sniff))
         .with_state(ApiState { registry, base_url, cors })
+}
+
+/// Every response from the API: browsers must not guess another media type.
+async fn no_sniff(mut resp: Response) -> Response {
+    resp.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    resp
 }
 
 /// An RFC 9457 problem (`about:blank`, so the title is the status phrase),
@@ -228,9 +235,9 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
     };
     let revision = latest_context().revision;
     // Weak: it names the data's and the context's revisions, not these exact
-    // bytes, and changes when either does. `version` is checked to be
+    // bytes, and changes when either does. The data's version is checked to be
     // ETag-safe when the registry loads.
-    let etag = registry.version().map(|v| format!("W/\"{v};r{revision}\""));
+    let etag = registry.data_version().map(|v| format!("W/\"{v};r{revision}\""));
     match preconditions(&headers, etag.as_deref()) {
         Some(StatusCode::PRECONDITION_FAILED) => return problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
         Some(status) => {
@@ -253,8 +260,8 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
         "message": "Approved institutions.",
         "result": registry.approved(),
     });
-    if let Some(v) = registry.version() {
-        body["version"] = v.into();
+    if let Some(v) = registry.data_version() {
+        body["data_version"] = v.into();
     }
     (out, Json(body)).into_response()
 }
@@ -275,7 +282,7 @@ async fn preflight_institutions(State(api): State<ApiState>, headers: HeaderMap)
     if api.cors.allow_origin(&headers, &mut out) {
         out.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET"));
         out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("If-None-Match"));
-        out.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("7200"));
+        out.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static(PREFLIGHT_MAX_AGE));
     }
     (StatusCode::NO_CONTENT, out).into_response()
 }
@@ -288,31 +295,22 @@ async fn list_method_not_allowed(State(api): State<ApiState>, method: Method, he
     problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
 }
 
-/// Headers for everything under /api/v1 except the list: open to any origin.
+/// Headers for every context response: open to any origin.
 fn any_origin() -> HeaderMap {
     let mut out = HeaderMap::new();
     out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
     out
 }
 
-/// `/api/v1` itself, which names no resource.
-async fn api_root() -> Response {
-    problem(StatusCode::NOT_FOUND, "No such resource.", any_origin())
-}
-
-/// The context revisions, and a 404 for any other path under /api/v1. Open
-/// to any origin, since JSON-LD processors in other sites' pages fetch the
-/// contexts. A revision's URL never changes content, so it can be cached
-/// indefinitely, and it has no ETag. (axum drops the body of a HEAD response.)
-async fn api_path(method: Method, Path(path): Path<String>, headers: HeaderMap) -> Response {
+/// A context revision. Open to any origin, since JSON-LD processors in
+/// other sites' pages fetch the contexts. A revision's URL never changes
+/// content, so it can be cached indefinitely, and it has no ETag. (axum
+/// answers HEAD with this handler and drops the body.)
+async fn get_context(Path(revision): Path<String>, headers: HeaderMap) -> Response {
     let mut out = any_origin();
-    let Some(ctx) = context_revision(&path) else {
+    let Some(ctx) = context_revision(&revision) else {
         return problem(StatusCode::NOT_FOUND, "No such resource.", out);
     };
-    if method != Method::GET && method != Method::HEAD {
-        out.insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
-        return problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out);
-    }
     match preconditions(&headers, None) {
         Some(StatusCode::PRECONDITION_FAILED) => problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
         Some(status) => {
@@ -327,9 +325,21 @@ async fn api_path(method: Method, Path(path): Path<String>, headers: HeaderMap) 
     }
 }
 
-/// Contract tests: the responses are checked against api/openapi.yaml itself,
-/// and the spec against the JSON-LD context, so the three cannot drift apart.
-/// conformance/ checks the same contract over HTTP against any deployment.
+/// Any other method on a context path: a 404 for an unpublished revision,
+/// else a 405.
+async fn context_method_not_allowed(method: Method, Path(revision): Path<String>) -> Response {
+    let mut out = any_origin();
+    if context_revision(&revision).is_none() {
+        return problem(StatusCode::NOT_FOUND, "No such resource.", out);
+    }
+    out.insert(header::ALLOW, HeaderValue::from_static(CONTEXT_ALLOW));
+    problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
+}
+
+/// Contract tests: the responses are checked against api/openapi.yaml itself.
+/// The spec's own consistency (examples, context agreement, revision
+/// bookkeeping) is checked by scripts/check_spec.py, and conformance/ checks
+/// the same contract over HTTP against any deployment.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,13 +354,7 @@ mod tests {
     const MOCK: &str = include_str!("../mock/approved_institutions.json");
     const BASE: &str = "https://tms.example.org";
     /// The spec's path for every context revision.
-    const CONTEXT_SPEC_PATH: &str = "/api/v1/institutions.context.r{revision}.jsonld";
-    /// SHA-256 of each published api/institutions.context.r<n>.jsonld, line
-    /// endings normalised. Add a row with each new revision; never edit one.
-    const CONTEXT_SHA256: &[(u32, &str)] = &[
-        (1, "0c053922807aef6eb421cffc9fe70b6dc266886907109972530d2d44a6851f93"),
-        (2, "615ed222b4642a186c6bd17d4dbbe895cc10c33fbab6f08ca672b917989b14b0"),
-    ];
+    const CONTEXT_SPEC_PATH: &str = "/api/v1/contexts/institutions/{revision}";
 
     /// The mock registry's ETag: its version and the latest context revision.
     fn mock_etag() -> String {
@@ -455,15 +459,7 @@ mod tests {
 
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_valid("InstitutionsResponse", &body);
-        assert_eq!(body["version"], "mock-0.1.0");
-    }
-
-    #[test]
-    fn spec_etag_is_weak_and_names_the_context() {
-        assert!(header_fits("ETag", "W/\"2026-10-23.1;r2\""));
-        for bad in ["\"2026-10-23.1;r2\"", "W/\"2026-10-23.1\"", "W/\"2026;r0\"", "W/\"a,b;r2\"", "W/\";r2\""] {
-            assert!(!header_fits("ETag", bad), "{bad}");
-        }
+        assert_eq!(body["data_version"], "mock-0.1.0");
     }
 
     /// Query strings and Accept change nothing.
@@ -505,12 +501,9 @@ mod tests {
         spec()["components"]["headers"][name]["schema"]["const"].as_str().unwrap().to_string()
     }
 
-    /// The spec's `const` for a header of the preflight's 204, as sent.
+    /// The spec's `const` for a header of the preflight's 204.
     fn preflight_header(name: &str) -> String {
-        match &spec()["paths"][LIST_PATH]["options"]["responses"]["204"]["headers"][name]["schema"]["const"] {
-            Value::String(s) => s.clone(),
-            v => v.to_string(),
-        }
+        spec()["paths"][LIST_PATH]["options"]["responses"]["204"]["headers"][name]["schema"]["const"].as_str().unwrap().to_string()
     }
 
     async fn preflight(cors: Cors, origin: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
@@ -528,14 +521,14 @@ mod tests {
         let (status, headers, body) = preflight(cors.clone(), Some(PORTAL)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(body.is_empty());
+        assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ListAllow").as_str()));
         for (name, spec_name) in [
-            (header::ALLOW, "Allow"),
             (header::ACCESS_CONTROL_ALLOW_METHODS, "Access-Control-Allow-Methods"),
             (header::ACCESS_CONTROL_ALLOW_HEADERS, "Access-Control-Allow-Headers"),
-            (header::ACCESS_CONTROL_MAX_AGE, "Access-Control-Max-Age"),
         ] {
             assert_eq!(header(&headers, name), Some(preflight_header(spec_name).as_str()), "{spec_name}");
         }
+        assert_eq!(header(&headers, header::ACCESS_CONTROL_MAX_AGE), Some(PREFLIGHT_MAX_AGE));
         assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL));
         assert_eq!(header(&headers, header::VARY), Some("Origin"));
         assert!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS).is_none());
@@ -652,7 +645,7 @@ mod tests {
         }
         // Another tag; one naming only the data's version (an older context);
         // members that are not entity tags; `*` inside a list.
-        for tag in ["\"old\"", "W/\"old\"", "W/\"mock-0.1.0\"", "mock-0.1.0;r2", "w/\"mock-0.1.0;r2\"", "\"old\", *", "*, \"old\""] {
+        for tag in ["\"old\"", "W/\"old\"", "W/\"mock-0.1.0\"", "mock-0.1.0;r1", "w/\"mock-0.1.0;r1\"", "\"old\", *", "*, \"old\""] {
             let (status, _, _) = get(MOCK, LIST_PATH, Some(tag)).await;
             assert_eq!(status, StatusCode::OK, "{tag}");
         }
@@ -685,7 +678,9 @@ mod tests {
         let etag = mock_etag();
         let (status, _, _) = request(MOCK, cors.clone(), LIST_PATH, &[(header::IF_MATCH, "*")]).await;
         assert_eq!(status, StatusCode::OK);
-        for tag in [etag.as_str(), "\"mock-0.1.0;r2\"", "\"x\""] {
+        // `*` is valid only as the whole field, so a list holding it fails too.
+        let listed = format!("*, {etag}");
+        for tag in [etag.as_str(), "\"mock-0.1.0;r1\"", "\"x\"", "*, \"x\"", &listed] {
             let headers = [(header::ORIGIN, PORTAL), (header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
             let (status, headers, body) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
             assert_problem(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
@@ -707,7 +702,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(header(&headers, header::ETAG).is_none());
         let body: Value = serde_json::from_slice(&body).unwrap();
-        assert!(body.get("version").is_none());
+        assert!(body.get("data_version").is_none());
         assert_valid("InstitutionsResponse", &body);
 
         // `*` matches any current list, version or not.
@@ -748,7 +743,7 @@ mod tests {
         for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::TRACE] {
             let (status, headers, body) = send(MOCK, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
             assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
-            assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW), "{method}");
+            assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ListAllow").as_str()), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{method}");
             assert_eq!(header(&headers, header::VARY), Some("Origin"), "{method}");
@@ -757,26 +752,48 @@ mod tests {
         for method in [Method::POST, Method::OPTIONS, Method::DELETE] {
             let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &context, &[]).await;
             assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
-            assert_eq!(header(&headers, header::ALLOW), Some("GET, HEAD"), "{method}");
+            assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ContextAllow").as_str()), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method}");
         }
     }
 
+    /// An unpublished revision is a 404 for any method. Other paths are
+    /// outside the API, so it says nothing about them.
     #[tokio::test]
-    async fn unknown_api_paths_are_not_found() {
-        let next = format!("r{}", CONTEXTS.len() + 1);
-        for file in ["r0", "r01", "r+1", next.as_str()] {
-            let path = format!("/api/v1/institutions.context.{file}.jsonld");
-            let (status, headers, body) = get(MOCK, &path, None).await;
-            assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
-            assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{path}");
-        }
-        for path in ["/api/v1", "/api/v1/", "/api/v1/institutions/", "/api/v1/institutions.context.jsonld", "/api/v1/nope", "/api/v1/a/b/c"] {
-            for method in [Method::GET, Method::POST] {
-                let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), path, &[]).await;
-                assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
+    async fn unpublished_revisions_are_not_found() {
+        let next = (CONTEXTS.len() + 1).to_string();
+        for revision in ["0", "01", "+1", "r1", next.as_str()] {
+            let path = format!("/api/v1/contexts/institutions/{revision}");
+            for method in [Method::GET, Method::HEAD, Method::POST] {
+                let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &path, &[]).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+                if method != Method::HEAD {
+                    assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
+                }
                 assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method} {path}");
             }
+        }
+    }
+
+    /// Every response, errors and 304s included, forbids content sniffing.
+    #[tokio::test]
+    async fn every_response_forbids_sniffing() {
+        let context = context_path(latest_context().revision);
+        let etag = mock_etag();
+        let cases: &[(Method, &str, &[(header::HeaderName, &str)])] = &[
+            (Method::GET, LIST_PATH, &[]),
+            (Method::GET, LIST_PATH, &[(header::IF_NONE_MATCH, etag.as_str())]),
+            (Method::GET, LIST_PATH, &[(header::IF_MATCH, "\"x\"")]),
+            (Method::OPTIONS, LIST_PATH, &[]),
+            (Method::POST, LIST_PATH, &[]),
+            (Method::GET, &context, &[]),
+            (Method::GET, &context, &[(header::IF_NONE_MATCH, "*")]),
+            (Method::POST, &context, &[]),
+            (Method::GET, "/api/v1/contexts/institutions/0", &[]),
+        ];
+        for (method, path, headers) in cases {
+            let (status, out, _) = send(MOCK, Cors::Any, method.clone(), path, headers).await;
+            assert_eq!(header(&out, header::X_CONTENT_TYPE_OPTIONS), Some(spec_header("NoSniff").as_str()), "{method} {path} {status}");
         }
     }
 
@@ -805,31 +822,24 @@ mod tests {
         }
     }
 
-    /// Published revisions are cached indefinitely, so they are frozen. To
-    /// change the context, add api/institutions.context.r<n+1>.jsonld, a
-    /// CONTEXTS row and a CONTEXT_SHA256 row for it, add n+1 to the spec's
-    /// `revision` enum and its hash to `x-context-sha256`, and point the
-    /// spec's Link header, ETag example and context example at it; the tests
-    /// below catch a missed step.
+    /// Published revisions are cached indefinitely, so they are frozen: each
+    /// served revision has the SHA-256 the spec publishes for it, and the
+    /// revisions run r1, r2, ... with no gaps. To change the context, add
+    /// api/institutions.context.r<n+1>.jsonld and a CONTEXTS row for it, add
+    /// n+1 to the spec's `revision` enum and its hash to `x-context-sha256`,
+    /// and point the spec's Link header, ETag examples and context example at
+    /// it; these tests and scripts/check_spec.py catch a missed step.
     #[test]
     fn published_contexts_do_not_change() {
         let revisions: Vec<u32> = CONTEXTS.iter().map(|c| c.revision).collect();
         assert_eq!(revisions, (1..=CONTEXTS.len() as u32).collect::<Vec<_>>(), "revisions run r1, r2, ... with no gaps");
-        let pinned: Vec<u32> = CONTEXT_SHA256.iter().map(|(r, _)| *r).collect();
-        assert_eq!(pinned, revisions, "every revision has exactly one pinned SHA-256");
-        for (ctx, (_, sha)) in CONTEXTS.iter().zip(CONTEXT_SHA256) {
-            assert_eq!(sha256(ctx.body), *sha, "context r{} changed: publish it as r{} instead", ctx.revision, CONTEXTS.len() + 1);
-        }
-    }
-
-    /// The spec publishes the same hashes, so a separate server's copy can be
-    /// checked against them.
-    #[test]
-    fn spec_publishes_the_context_hashes() {
         let spec = spec();
-        let published = spec["paths"][CONTEXT_SPEC_PATH]["get"]["x-context-sha256"].as_object().unwrap().clone();
-        let pinned: serde_json::Map<String, Value> = CONTEXT_SHA256.iter().map(|(r, sha)| (r.to_string(), json!(sha))).collect();
-        assert_eq!(published, pinned);
+        let published = spec["paths"][CONTEXT_SPEC_PATH]["get"]["x-context-sha256"].as_object().unwrap();
+        assert_eq!(published.len(), CONTEXTS.len(), "the spec publishes one SHA-256 per served revision");
+        for ctx in CONTEXTS {
+            let sha = published[&ctx.revision.to_string()].as_str().unwrap();
+            assert_eq!(sha256(ctx.body), sha, "context r{} changed: publish it as r{} instead", ctx.revision, CONTEXTS.len() + 1);
+        }
     }
 
     /// The files in api/ are exactly the served revisions, each named for its
@@ -854,143 +864,31 @@ mod tests {
     }
 
     /// The spec's `revision` enum lists every served revision and no other,
-    /// and everywhere it names a revision (the Link header's text and
-    /// example, the ETag examples) it names the latest one.
+    /// and its Link example names the latest one at the served path.
     #[test]
     fn spec_documents_every_revision_and_links_the_latest() {
         let spec = spec();
-        let context_paths: Vec<&String> = spec["paths"].as_object().unwrap().keys().filter(|p| p.contains("institutions.context.")).collect();
-        assert_eq!(context_paths, [CONTEXT_SPEC_PATH], "one templated path for every revision");
         let param = &spec["components"]["parameters"]["Revision"];
         assert_eq!(param["name"], "revision");
         let documented: Vec<&str> = param["schema"]["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         let served: Vec<String> = CONTEXTS.iter().map(|c| c.revision.to_string()).collect();
         assert_eq!(documented, served);
-
-        let latest = latest_context().revision;
-        let mut mentions = 0;
-        for marker in ["institutions.context.r", ";r"] {
-            for line in SPEC.lines() {
-                for (at, _) in line.match_indices(marker) {
-                    let digits: String = line[at + marker.len()..].chars().take_while(char::is_ascii_digit).collect();
-                    if !digits.is_empty() {
-                        assert_eq!(digits.parse::<u32>().unwrap(), latest, "spec names r{digits}, not the latest r{latest}: {line}");
-                        mentions += 1;
-                    }
-                }
-            }
-        }
-        assert!(mentions > 0, "the spec names the latest revision");
         let example = spec["components"]["headers"]["ContextLink"]["example"].as_str().unwrap();
-        assert_eq!(example, link_to(&context_path(latest)), "the spec's Link example");
+        assert_eq!(example, link_to(&context_path(latest_context().revision)), "the spec's Link example");
     }
 
-    /// The spec carries the latest context in full, so an implementer has
-    /// its content without the repository.
+    /// The registry's providers are exactly the spec's known values, under
+    /// the same names.
     #[test]
-    fn spec_context_example_is_the_latest_revision() {
+    fn registry_providers_are_the_spec_known_values() {
+        use crate::institutions::Provider;
         let spec = spec();
-        let ok = &spec["paths"][CONTEXT_SPEC_PATH]["get"]["responses"]["200"];
-        let example = &ok["content"]["application/ld+json"]["examples"]["latest"]["value"];
-        let latest: Value = serde_json::from_str(latest_context().body).unwrap();
-        assert_eq!(*example, latest);
-        assert_eq!(ok["content"]["application/ld+json"]["examples"]["latest"]["summary"], format!("Revision {}", latest_context().revision));
-    }
-
-    #[test]
-    fn spec_examples_conform_to_the_spec() {
-        let spec = spec();
-        let examples = &spec["paths"][LIST_PATH]["get"]["responses"]["200"]["content"]["application/json"]["examples"];
-        for (name, example) in examples.as_object().unwrap() {
-            assert_valid("InstitutionsResponse", &example["value"]);
-            assert!(!name.contains("mock"), "example {name:?} names the demo");
-        }
-        let responses = spec["components"]["responses"].as_object().unwrap();
-        let mut checked = 0;
-        for response in responses.values() {
-            if let Some(examples) = response["content"]["application/problem+json"]["examples"].as_object() {
-                for example in examples.values() {
-                    assert_valid("Problem", &example["value"]);
-                    let status = StatusCode::from_u16(example["value"]["status"].as_u64().unwrap() as u16).unwrap();
-                    assert_eq!(example["value"]["title"], status.canonical_reason().unwrap());
-                    checked += 1;
-                }
-            }
-        }
-        assert!(checked >= 4, "problem examples checked: {checked}");
-    }
-
-    #[test]
-    fn spec_rejects_entries_the_registry_refuses() {
-        let good = json!({
-            "type": "Organization", "id": "a", "name": "A", "provider": "globus",
-            "redirect_idp_domain": "a.edu", "idp_logout_url": "https://idp.a.edu/logout", "approved": true
-        });
-        assert_valid("Institution", &good);
-        let v = validator("Institution");
-        for (field, bad) in [
-            ("id", json!("A")),
-            ("id", json!("a".repeat(65))),
-            ("name", json!("")),
-            ("name", json!("   ")),
-            ("redirect_idp_domain", json!("..")),
-            ("redirect_idp_domain", json!("UChicago.edu")),
-            ("redirect_idp_domain", json!("10.0.0.1")),
-            ("idp_logout_url", json!("http://idp.a.edu/logout")),
-            ("idp_logout_url", json!("https://")),
-            ("idp_logout_url", json!("https://idp.a.edu/log out")),
-            ("approved", json!(false)),
-            ("type", json!("Thing")),
-        ] {
-            let mut entry = good.clone();
-            entry[field] = bad.clone();
-            assert!(!v.is_valid(&entry), "{field} = {bad}");
-        }
-        let mut tapis = good.clone();
-        tapis["provider"] = json!("tacc_tapis");
-        assert!(!v.is_valid(&tapis), "tacc_tapis with a domain");
-
-        let list = validator("InstitutionsResponse");
-        let response = |version: &str| json!({ "type": "ItemList", "status": "success", "message": "", "version": version, "result": [] });
-        assert!(list.is_valid(&response("2026-10-23.1")));
-        for bad in ["a,b", "a\"b", "a b", ""] {
-            assert!(!list.is_valid(&response(bad)), "version {bad:?}");
-        }
-    }
-
-    /// Every field the spec maps with `x-schema-org` must map to the same term
-    /// in the latest JSON-LD context, and the envelope-only fields must stay out.
-    #[test]
-    fn spec_and_context_agree() {
-        let spec = spec();
-        let ctx: Value = serde_json::from_str(latest_context().body).unwrap();
-        let ctx = &ctx["@context"];
-        let term = |key: &str| match &ctx[key] {
-            Value::String(s) => Some(s.clone()),
-            Value::Object(o) => o.get("@id").and_then(Value::as_str).map(String::from),
-            _ => None,
-        };
-        let schemas = &spec["components"]["schemas"];
-        for schema in ["InstitutionsResponse", "Institution"] {
-            for (field, prop) in schemas[schema]["properties"].as_object().unwrap() {
-                let mapped = prop.get("x-schema-org").or_else(|| {
-                    let r = prop.get("$ref")?.as_str()?.rsplit('/').next()?;
-                    schemas[r].get("x-schema-org")
-                });
-                match mapped.and_then(Value::as_str) {
-                    Some(iri) => assert_eq!(term(field).as_deref(), Some(iri), "{schema}.{field}"),
-                    None => assert!(ctx[field].is_null() && ctx.get(field).is_some(), "{schema}.{field} must be null in the context"),
-                }
-            }
-            let ty = schemas[schema]["x-schema-org"]["@type"].as_str().unwrap();
-            let name = schemas[schema]["properties"]["type"]["const"].as_str().unwrap();
-            assert_eq!(term(name).as_deref(), Some(ty), "{schema} type");
-        }
-        for provider in schemas["Provider"]["enum"].as_array().unwrap() {
-            let p = provider.as_str().unwrap();
-            assert!(term(p).is_some_and(|t| t.starts_with("tms:")), "provider {p}");
-            let parsed: crate::institutions::Provider = serde_json::from_value(provider.clone()).unwrap();
-            assert_eq!(serde_json::to_value(parsed).unwrap(), *provider);
+        let known = spec["components"]["schemas"]["Provider"]["x-known-values"].as_array().unwrap().clone();
+        let ours: Vec<Value> = [Provider::Globus, Provider::TaccTapis].iter().map(|p| serde_json::to_value(p).unwrap()).collect();
+        assert_eq!(ours, known);
+        for value in &known {
+            let parsed: Provider = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), *value);
         }
     }
 }

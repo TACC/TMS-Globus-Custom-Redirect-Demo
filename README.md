@@ -16,8 +16,8 @@ addition being `redirect_idp_domain`.
 ## What it shows
 
 1. `GET /api/v1/institutions` serves the approved entries of the registry
-   file `mock/approved_institutions.json` (`{ version, institutions }`) in a
-   Tapis-style envelope, `type / status / message / version / result`, as
+   file `mock/approved_institutions.json` (`{ data_version, institutions }`) in a
+   Tapis-style envelope, `type / status / message / data_version / result`, as
    specified in `api/openapi.yaml`. The registry is checked against the
    spec's rules when it loads (unique ids, lower-case domains, `https`
    sign-out URLs, no domain for Tapis), so a bad entry stops the server
@@ -310,26 +310,37 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 cargo test
 npx @redocly/cli@2.60.0 lint                  # the spec, configured by redocly.yaml
 pip install -r conformance/requirements.txt
+python -m pytest scripts/check_spec.py        # the spec against itself and its contexts
 python scripts/check_jsonld.py                # the spec's example
 conformance/run_against_demo.sh               # conformance suite + live JSON-LD check, per CORS setting
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of them.
 
-The API contract tests in `src/institutions_api.rs` call the API in-process
-and validate the responses against the schemas in `api/openapi.yaml`, check
-their headers (`Link`, `Cache-Control`, the weak `ETag`
-`W/"<version>;r<n>"`, `If-None-Match` parsed by the RFC 9110 grammar and
-`If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS` preflight on
-the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), the
-RFC 9457 errors (404, 405, 412, and 500/503 from a broken or missing
-registry file), and check that every field the spec maps with
-`x-schema-org` maps to the same term in the JSON-LD context.
+The spec's own checks need no implementation, so they travel with `api/`
+to any server's repository. `scripts/check_spec.py` checks that the
+examples fit their schemas, that the schemas refuse bad entries, that every
+field the spec maps with `x-schema-org` maps to the same term in the latest
+JSON-LD context (and every known `provider` value too), that the context
+files, the `revision` enum and `x-context-sha256` agree, and that
+everywhere the spec names a revision it names the latest.
 `scripts/check_jsonld.py` expands the spec's example with that context and
 checks the resulting RDF, counting each mapped field against the entries;
-with `--url <base>` it does the same for a live deployment's list and the
+what each field must map to is read from the spec and the context. With
+`--url <base>` it does the same for a live deployment's list and the
 context its `Link` header names, and `--spec <path>` checks another copy of
 the spec.
+
+The demo's API contract tests in `src/institutions_api.rs` call the API
+in-process and validate the responses against the schemas in
+`api/openapi.yaml`, check their headers (`Link`, `Cache-Control`, the weak
+`ETag` `W/"<data_version>;r<n>"`, `If-None-Match` parsed by the RFC 9110
+grammar and `If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS`
+preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the
+context, `X-Content-Type-Options: nosniff` everywhere), the RFC 9457 errors
+(404 for an unpublished revision, 405, 412, and 500/503 from a broken or
+missing registry file), and that the served contexts and providers are the
+ones the spec publishes.
 
 `conformance/` is a black-box suite for any implementation of the spec, in
 any language: it takes every expectation from the spec (including the
@@ -342,26 +353,35 @@ API_BASE_URL=https://tms.example.org API_CORS='https://portal.example.org' \
 ```
 
 `API_CORS` is the deployment's allowed-origin setting (empty, `*`, or
-comma-separated origins). Header lists are compared as sets, and
-`Cache-Control` as the directives it must carry, as the spec's "Header
-values" section allows. `run_against_demo.sh` starts the demo three times,
-once per kind of setting, and runs the suite and `check_jsonld.py --url`
-against each. The 500 and 503 responses cannot be caused from outside, so
-only the in-process tests cover them.
+comma-separated origins). `API_EXTRA_HEADERS`, a JSON object, adds headers
+to every request (for a gateway's credentials, say); `check_jsonld.py
+--url` honours it too. Header values are compared as the spec's "Header
+values" section allows: `Allow` exactly, `Vary`, `Link` and the
+`Access-Control-*` lists as members the response must at least carry, and
+`Cache-Control` as the directives it must carry; HEAD is compared with GET
+only on the headers the spec defines. `run_against_demo.sh` starts the demo
+three times, once per kind of setting, and runs the suite and
+`check_jsonld.py --url` against each. The 500 and 503 responses cannot be
+caused from outside, so only the in-process tests cover them.
+
+To run the suite against a real deployment from CI, use
+`.github/workflows/conformance-external.yml`: start it by hand with the
+deployment's base URL and CORS setting, or call it from another workflow
+after a deploy. Gateway credentials go in the `CONFORMANCE_EXTRA_HEADERS`
+secret, as a JSON object.
 
 The context is revised separately from the API: each revision
 (`api/institutions.context.r<n>.jsonld`, served at
-`/api/v1/institutions.context.r<n>.jsonld`) is cached indefinitely, so it never
-changes; a test fails if it does. Revision 2 is revision 1 without
-`@version: 1.1`, which it did not need. To change the context, add the next
-revision (`.r3.jsonld`) with rows for it in `CONTEXTS` and the tests'
-`CONTEXT_SHA256` (in `src/institutions_api.rs`), add it to the spec's
-`revision` enum and its hash to `x-context-sha256`, and point the spec's
-`Link` header, `ETag` examples and context example at it. The list's `ETag`
-names the context revision, so it changes with it. Every revision stays served, and the tests check that each is
-unchanged, has its own file, is documented in the spec, and that the `Link`
-header and the spec's examples name the latest. `api/schema-org.md` explains
-the choice of linked-data terms.
+`/api/v1/contexts/institutions/<n>`) is cached indefinitely, so it never
+changes; a test fails if it does. To change the context, add the next
+revision (`.r2.jsonld`) with a row for it in `CONTEXTS` (in
+`src/institutions_api.rs`), add it to the spec's `revision` enum and its
+hash to `x-context-sha256`, and point the spec's `Link` header, `ETag`
+examples and context example at it. The list's `ETag` names the context
+revision, so it changes with it. Every revision stays served, and the
+tests check that each is unchanged, has its own file, is documented in the
+spec, and that the `Link` header and the spec's examples name the latest.
+`api/schema-org.md` explains the choice of linked-data terms.
 
 The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike
@@ -376,3 +396,8 @@ The state cookie is unsigned and has no expiry, there is no session after
 login, the test IdP has no real passwords and keeps codes and tokens in
 memory, and the mock endpoints should never be deployed. TMS already handles
 these with encoded state, DB-backed nonces and its own JWTs.
+
+## License
+
+GPL-3.0-only: see [LICENSE](LICENSE). This covers the API specification in
+`api/` as well as the demo.

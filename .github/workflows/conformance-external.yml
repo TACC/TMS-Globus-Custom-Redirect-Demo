@@ -1,0 +1,55 @@
+name: Conformance (external deployment)
+
+# Runs the black-box conformance suite and the live JSON-LD check against any
+# deployment of api/openapi.yaml, not the demo. Start it by hand from the
+# Actions tab, or copy this file (with conformance/, scripts/check_jsonld.py
+# and api/) into the implementation's repository and call it after a deploy.
+#
+# A gateway in front of the deployment may need credentials: put them in the
+# CONFORMANCE_EXTRA_HEADERS secret as a JSON object, e.g.
+# {"Authorization": "Bearer ..."}. They are sent with every request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Base URL of the deployment, with no trailing slash
+        required: true
+        type: string
+      cors:
+        description: "The deployment's allowed origins: empty, *, or comma-separated origins"
+        required: false
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      base_url:
+        required: true
+        type: string
+      cors:
+        required: false
+        default: ""
+        type: string
+    secrets:
+      CONFORMANCE_EXTRA_HEADERS:
+        required: false
+
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs (tag in the comment); update both together.
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      API_BASE_URL: ${{ inputs.base_url }}
+      API_CORS: ${{ inputs.cors }}
+      API_EXTRA_HEADERS: ${{ secrets.CONFORMANCE_EXTRA_HEADERS }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r conformance/requirements.txt
+      - run: python -m pytest -q -p no:cacheprovider conformance
+      - run: python scripts/check_jsonld.py --url "$API_BASE_URL"

@@ -6,7 +6,7 @@ list; it explains why the fields map to the terms they do.
 
 The payload stays plain, flat JSON. Each schema and field in the spec names
 the linked-data term it means with `x-schema-org`, and the latest context
-holds the same mapping (the `spec_and_context_agree` test checks this).
+holds the same mapping (`scripts/check_spec.py` checks this).
 
 - The response is a [schema:ItemList](https://schema.org/ItemList) and each
   entry a [schema:Organization](https://schema.org/Organization). The `type`
@@ -17,12 +17,14 @@ holds the same mapping (the `spec_and_context_agree` test checks this).
 - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
   login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
   That namespace is not published yet, so its IRIs do not resolve.
-- The envelope fields `status`, `message` and `version` describe the HTTP
+- The envelope fields `status`, `message` and `data_version` describe the HTTP
   response, not the institutions, so the context leaves them out of the
   graph.
-- `provider` values are vocabulary terms (`"@type": "@vocab"`): `globus`
-  and `tacc_tapis` expand to `tms:GlobusProvider` and `tms:TaccTapisProvider`.
-  A new provider value needs a new context revision that maps it.
+- `provider` values are vocabulary terms (`"@type": "@vocab"`): the known
+  values `globus` and `tacc_tapis` expand to `tms:GlobusProvider` and
+  `tms:TaccTapisProvider`. `provider` is an open set, so a new value needs a
+  new context revision that maps it; until a client has that revision, an
+  unmapped value expands to an IRI relative to the document's base.
 
 ## Related terms
 
