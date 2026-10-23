@@ -62,7 +62,9 @@ pub struct InstitutionsResponse {
     pub kind: ListType,
     pub status: String,
     pub message: String,
-    pub version: String,
+    /// Revision of the list; optional in api/openapi.yaml.
+    #[serde(default)]
+    pub version: Option<String>,
     pub result: Vec<Institution>,
 }
 
@@ -166,6 +168,12 @@ mod tests {
 
         let wrong = r#"{"status":"success","message":"","version":"","result":[{"type":"Thing","id":"a","name":"A","approved":true}]}"#;
         assert!(Registry::from_json(wrong).is_err());
+    }
+
+    #[test]
+    fn version_is_optional() {
+        let unversioned = r#"{"status":"success","message":"","result":[{"id":"a","name":"A","approved":true}]}"#;
+        assert!(Registry::from_json(unversioned).is_ok());
     }
 
     #[test]

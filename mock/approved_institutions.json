@@ -10,12 +10,14 @@
       "name": "Globus (default login, no redirect)",
       "provider": "globus",
       "redirect_idp_domain": null,
+      "idp_logout_url": null,
       "approved": true
     },
     {
       "type": "Organization",
       "id": "uchicago",
       "name": "University of Chicago",
+      "provider": "globus",
       "redirect_idp_domain": "uchicago.edu",
       "idp_logout_url": "https://uchicago.okta.com/login/signout",
       "approved": true
@@ -24,6 +26,7 @@
       "type": "Organization",
       "id": "utexas",
       "name": "The University of Texas at Austin",
+      "provider": "globus",
       "redirect_idp_domain": "utexas.edu",
       "idp_logout_url": "https://enterprise.login.utexas.edu/idp/profile/Logout",
       "approved": true
@@ -32,6 +35,7 @@
       "type": "Organization",
       "id": "illinois",
       "name": "University of Illinois Urbana-Champaign",
+      "provider": "globus",
       "redirect_idp_domain": "illinois.edu",
       "idp_logout_url": "https://shibboleth.illinois.edu/idp/profile/Logout",
       "approved": false
@@ -40,6 +44,7 @@
       "type": "Organization",
       "id": "sdsc",
       "name": "San Diego Supercomputer Center",
+      "provider": "globus",
       "redirect_idp_domain": "ucsd.edu",
       "idp_logout_url": "https://a5.ucsd.edu/tritON/profile/Logout",
       "approved": true
@@ -48,6 +53,7 @@
       "type": "Organization",
       "id": "stanford",
       "name": "Stanford University",
+      "provider": "globus",
       "redirect_idp_domain": "stanford.edu",
       "idp_logout_url": "https://login.stanford.edu/idp/profile/Logout",
       "approved": true
@@ -58,12 +64,14 @@
       "name": "Tapis OAuth2 (TaccTapis)",
       "provider": "tacc_tapis",
       "redirect_idp_domain": null,
+      "idp_logout_url": null,
       "approved": true
     },
     {
       "type": "Organization",
       "id": "usc",
       "name": "University of Southern California",
+      "provider": "globus",
       "redirect_idp_domain": "usc.edu",
       "idp_logout_url": "https://shibboleth.usc.edu/idp/profile/Logout",
       "approved": false
@@ -72,6 +80,7 @@
       "type": "Organization",
       "id": "mit",
       "name": "Massachusetts Institute of Technology",
+      "provider": "globus",
       "redirect_idp_domain": "mit.edu",
       "idp_logout_url": "https://okta.mit.edu/login/signout",
       "approved": false
@@ -80,7 +89,9 @@
       "type": "Organization",
       "id": "example",
       "name": "Example University (pending review)",
+      "provider": "globus",
       "redirect_idp_domain": "example.edu",
+      "idp_logout_url": null,
       "approved": false
     }
   ]

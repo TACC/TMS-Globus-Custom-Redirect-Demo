@@ -90,10 +90,12 @@ paths:
                         name: Globus (default login, no redirect)
                         provider: globus
                         redirect_idp_domain: null
+                        idp_logout_url: null
                         approved: true
                       - type: Organization
                         id: uchicago
                         name: University of Chicago
+                        provider: globus
                         redirect_idp_domain: uchicago.edu
                         idp_logout_url: https://uchicago.okta.com/login/signout
                         approved: true
@@ -102,11 +104,14 @@ paths:
                         name: Tapis OAuth2 (TaccTapis)
                         provider: tacc_tapis
                         redirect_idp_domain: null
+                        idp_logout_url: null
                         approved: true
                       - type: Organization
                         id: example
                         name: Example University (pending review)
+                        provider: globus
                         redirect_idp_domain: example.edu
+                        idp_logout_url: null
                         approved: false
         "500":
           description: The registry could not be read.
@@ -122,7 +127,7 @@ components:
       description: Tapis-style envelope around the institution list.
       x-schema-org:
         "@type": schema:ItemList
-      required: [status, message, result]
+      required: [type, status, message, result]
       properties:
         type:
           const: ItemList
@@ -135,10 +140,16 @@ components:
           description: Human-readable summary of the response.
         version:
           type: string
-          description: Version of the institution list. Present in the mock file; the demo server omits it.
+          description: |
+            Revision of the institution data (not of this API), so a client can
+            tell when the list has changed. Optional; readers must not require it.
           examples: [mock-0.1.0]
         result:
           type: array
+          description: |
+            Every institution, approved or not, in registry order. Each `id`
+            appears at most once; the server must enforce this, since JSON
+            Schema cannot.
           items:
             $ref: "#/components/schemas/Institution"
           x-schema-org: schema:itemListElement
@@ -156,10 +167,12 @@ components:
 
     Institution:
       type: object
-      description: An organization users can sign in through.
       x-schema-org:
         "@type": schema:Organization
-      required: [id, name, approved]
+      description: |
+        An organization users can sign in through. Responses always include
+        every field, writing `null` where a field does not apply.
+      required: [type, id, name, provider, redirect_idp_domain, idp_logout_url, approved]
       properties:
         type:
           const: Organization
@@ -181,7 +194,6 @@ components:
         redirect_idp_domain:
           type: [string, "null"]
           format: hostname
-          default: null
           description: |
             Domain Globus associates with the institution's IdP, passed verbatim
             as `redirect_idp_domain` on the authorize request. Login also
@@ -193,11 +205,12 @@ components:
         idp_logout_url:
           type: [string, "null"]
           format: uri
-          default: null
+          pattern: "^https://"
           description: |
             Sign-out URL of the institution's own IdP. Globus does not pass
             `prompt=login` on to the IdP, so ending the IdP's session is the
             only way to make the next login ask for a password again.
+            `/logout/idp` redirects the browser here, so it must be `https`.
           examples: [https://uchicago.okta.com/login/signout]
           x-schema-org: tms:idpLogoutUrl
         approved:
@@ -209,7 +222,6 @@ components:
     Provider:
       type: string
       enum: [globus, tacc_tapis]
-      default: globus
       description: |
         Login flow for the entry, named after tms_portal's provider types.
         `globus`: Globus Auth, optionally steered by `redirect_idp_domain`.
