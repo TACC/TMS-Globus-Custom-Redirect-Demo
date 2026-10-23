@@ -1,0 +1,207 @@
+openapi: 3.1.0
+info:
+  title: Approved Institutions API
+  version: 0.3.0
+  summary: The institutions a user can sign in through, and the IdP each one steers to.
+  description: |
+    One read-only endpoint serving the IdP data in
+    `mock/approved_institutions.json` (consumed by `src/institutions.rs`).
+
+    Responses use the Tapis-style envelope `{ status, message, version, result }`.
+
+    ### schema.org mapping
+    The payload stays plain, flat JSON. Each schema and field names the
+    linked-data term it means with `x-schema-org`; `api/institutions.context.jsonld`
+    holds the same mapping as a JSON-LD context.
+
+    - The response is a [schema:ItemList](https://schema.org/ItemList) and each
+      entry a [schema:Organization](https://schema.org/Organization).
+    - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
+      login provider) use the `tms:` vocabulary (`urn:tacc:tms:vocab:`), a
+      placeholder until TMS publishes its own.
+
+    `x-schema-org-related` names the schema.org terms closest in meaning,
+    including ones from [pending.schema.org](https://pending.schema.org/docs/pending.home.html).
+    They need nested objects (an action, a certification) that a flat field
+    cannot express, so they document intent rather than map the field:
+
+    - **AuthenticateAction** (pending, issue 4507): signing in to the
+      institution's IdP. `provider` and `redirect_idp_domain` describe it.
+    - **Certification** / **certificationStatus** (core): `approved` amounts to
+      a Certification with status `CertificationActive` or `CertificationInactive`.
+
+    schema.org, pending included, has no term for an IdP domain or a sign-out
+    URL, so those stay in `tms:`.
+  license:
+    name: Proprietary
+externalDocs:
+  description: schema.org pending terms
+  url: https://pending.schema.org/docs/pending.home.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local demo server (BASE_URL)
+
+# Public: the list holds no secrets, and the login page reads it before sign-in.
+security:
+  - {}
+
+tags:
+  - name: institutions
+    description: Approved-institution registry
+
+paths:
+  /login/institutions:
+    get:
+      tags: [institutions]
+      operationId: listInstitutions
+      summary: List every institution with its IdP data and approval flag
+      description: |
+        Returns approved and unapproved entries alike, in registry order. The
+        UI offers only approved ones, and login refuses the rest.
+      responses:
+        "200":
+          description: All known institutions.
+          headers:
+            Link:
+              description: |
+                Optional. Points JSON-LD processors at the context, e.g.
+                `<api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstitutionsResponse"
+              examples:
+                mock:
+                  summary: mock/approved_institutions.json (abridged)
+                  value:
+                    status: success
+                    message: Approved institutions retrieved.
+                    version: mock-0.1.0
+                    result:
+                      - id: globus
+                        name: Globus (default login, no redirect)
+                        provider: globus
+                        redirect_idp_domain: null
+                        approved: true
+                      - id: uchicago
+                        name: University of Chicago
+                        redirect_idp_domain: uchicago.edu
+                        idp_logout_url: https://uchicago.okta.com/login/signout
+                        approved: true
+                      - id: tacc_tapis
+                        name: Tapis OAuth2 (TaccTapis)
+                        provider: tacc_tapis
+                        redirect_idp_domain: null
+                        approved: true
+                      - id: example
+                        name: Example University (pending review)
+                        redirect_idp_domain: example.edu
+                        approved: false
+        "500":
+          description: The registry could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    InstitutionsResponse:
+      type: object
+      description: Tapis-style envelope around the institution list.
+      x-schema-org:
+        "@type": schema:ItemList
+      required: [status, message, result]
+      properties:
+        status:
+          const: success
+          x-schema-org: tms:status
+        message:
+          type: string
+          description: Human-readable summary of the response.
+          x-schema-org: schema:description
+        version:
+          type: string
+          description: Version of the institution list. Present in the mock file; the demo server omits it.
+          examples: [mock-0.1.0]
+          x-schema-org: tms:listVersion
+        result:
+          type: array
+          items:
+            $ref: "#/components/schemas/Institution"
+          x-schema-org: schema:itemListElement
+
+    ErrorResponse:
+      type: object
+      required: [status, message, result]
+      properties:
+        status:
+          const: error
+          x-schema-org: tms:status
+        message:
+          type: string
+          x-schema-org: schema:description
+        result:
+          type: "null"
+
+    Institution:
+      type: object
+      description: An organization users can sign in through.
+      x-schema-org:
+        "@type": schema:Organization
+      required: [id, name, approved]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9_]+$"
+          description: Stable id the UI uses to pick the institution at login.
+          examples: [uchicago]
+          x-schema-org: schema:identifier
+        name:
+          type: string
+          description: Display name.
+          examples: [University of Chicago]
+          x-schema-org: schema:name
+        provider:
+          $ref: "#/components/schemas/Provider"
+        redirect_idp_domain:
+          type: [string, "null"]
+          format: hostname
+          default: null
+          description: |
+            Domain Globus associates with the institution's IdP, passed verbatim
+            as `redirect_idp_domain` on the authorize request. Login also
+            requires the returned username to end in `@<domain>`. `null` means a
+            plain login that accepts any identity.
+          examples: [uchicago.edu]
+          x-schema-org: tms:redirectIdpDomain
+          x-schema-org-related: [schema:AuthenticateAction]
+        idp_logout_url:
+          type: [string, "null"]
+          format: uri
+          default: null
+          description: |
+            Sign-out URL of the institution's own IdP. Globus does not pass
+            `prompt=login` on to the IdP, so ending the IdP's session is the
+            only way to make the next login ask for a password again.
+          examples: [https://uchicago.okta.com/login/signout]
+          x-schema-org: tms:idpLogoutUrl
+        approved:
+          type: boolean
+          description: Whether login may proceed for this institution.
+          x-schema-org: tms:approved
+          x-schema-org-related: [schema:Certification, schema:certificationStatus]
+
+    Provider:
+      type: string
+      enum: [globus, tacc_tapis]
+      default: globus
+      description: |
+        Login flow for the entry, named after tms_portal's provider types.
+        `globus`: Globus Auth, optionally steered by `redirect_idp_domain`.
+        `tacc_tapis`: Tapis OAuth2 directly, not through Globus.
+      x-schema-org: tms:provider
+      x-schema-org-related: [schema:AuthenticateAction, schema:provider]

@@ -1,0 +1,22 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "schema": "https://schema.org/",
+    "tms": "urn:tacc:tms:vocab:",
+
+    "status": "tms:status",
+    "message": "schema:description",
+    "version": "tms:listVersion",
+    "result": { "@id": "schema:itemListElement", "@container": "@list" },
+
+    "id": "schema:identifier",
+    "name": "schema:name",
+    "provider": { "@id": "tms:provider", "@type": "@vocab" },
+    "redirect_idp_domain": "tms:redirectIdpDomain",
+    "idp_logout_url": { "@id": "tms:idpLogoutUrl", "@type": "schema:URL" },
+    "approved": { "@id": "tms:approved", "@type": "schema:Boolean" },
+
+    "globus": "tms:GlobusProvider",
+    "tacc_tapis": "tms:TaccTapisProvider"
+  }
+}
