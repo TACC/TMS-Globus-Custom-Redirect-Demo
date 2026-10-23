@@ -15,7 +15,7 @@ addition being `redirect_idp_domain`.
 
 ## What it shows
 
-1. `GET /login/institutions` serves the approved entries of the registry
+1. `GET /api/v1/institutions` serves the approved entries of the registry
    file `mock/approved_institutions.json` (`{ version, institutions }`) in a
    Tapis-style envelope, `type / status / message / version / result`, as
    specified in `api/openapi.yaml`. The registry is checked against the
@@ -268,6 +268,7 @@ Set in `dev.env` (template: `dev.env.example`); environment variables override.
 | `BASE_URL`              | `http://localhost:8080` (no trailing `/`)          |
 | `BIND_ADDR`             | `127.0.0.1:8080`                                   |
 | `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
+| `CORS_ALLOWED_ORIGINS`  | unset → same-origin only; `*` → any origin; or comma-separated origins (`https://host[:port]`) that may read `/api/v1/institutions` |
 | `GLOBUS_CLIENT_ID`      | required unless `GLOBUS_MOCK=true`                 |
 | `GLOBUS_CLIENT_SECRET`  | required unless `GLOBUS_MOCK=true`                 |
 | `GLOBUS_MOCK`           | unset → real Globus Auth; `true` → built-in mock (also stands in for Tapis) |
@@ -290,8 +291,8 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
   Adding `("redirect_idp_domain", domain)` to its `query_params` vector is the
   same change shown in `src/globus.rs::build_authorize_url`.
 - The approved list would naturally live in a DB table next to
-  `identity_providers` / `allowed_redirects`, served by an endpoint like
-  `/login/idps`. The mocked JSON stands in for that.
+  `identity_providers` / `allowed_redirects`, served at
+  `/api/v1/institutions`. The mocked JSON stands in for that.
 - The callback check corresponds to a guard in `handle_callback` before
   `make_auth_token`, using the `preferred_username` / `organization` claims
   that `jwt_utils.rs` already reads.
@@ -313,15 +314,20 @@ CI (`.github/workflows/ci.yml`) runs all three.
 The API contract tests in `src/institutions_api.rs` call both public
 endpoints and validate the responses against the schemas in
 `api/openapi.yaml`, check their headers (`Link`, `Cache-Control`, `ETag` and
-`304 Not Modified`, CORS on the context), and check that every field the spec
+`304 Not Modified`, CORS and the `OPTIONS` preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), and check that every field the spec
 maps with `x-schema-org` maps to the same term in the JSON-LD context.
 `scripts/check_jsonld.py` expands the spec's example with that context and
 checks the resulting RDF.
 
-The context is versioned (`api/institutions.context.v1.jsonld`, served at
-`/api/institutions.context.v1.jsonld`) and cached indefinitely, so a published
-version never changes; a test fails if it does. To change the context, add
-the next version and point `CONTEXT_PATH` and the spec at it.
+The context is revised separately from the API: revision 1
+(`api/institutions.context.r1.jsonld`, served at
+`/api/v1/institutions.context.r1.jsonld`) is cached indefinitely, so it never
+changes; a test fails if it does. To change the context, add the next
+revision (`.r2.jsonld`) with rows for it in `CONTEXTS` and the tests'
+`CONTEXT_SHA256` (in `src/institutions_api.rs`), and point the spec's `Link`
+header at it. Every revision stays served, and the tests check that each is
+unchanged, has its own file, is documented in the spec, and that the `Link`
+header and the spec's example name the latest.
 
 The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike

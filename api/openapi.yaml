@@ -1,19 +1,20 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API
-  version: 0.3.0
+  version: 0.5.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
     Two read-only endpoints: the list of approved institutions a user can
     sign in through, with the IdP each one steers to, and the JSON-LD context
-    that maps that list to schema.org.
+    that maps that list to schema.org. The list also answers CORS preflight
+    requests.
 
     The list uses the Tapis-style envelope `{ type, status, message, version, result }`.
 
     ### schema.org mapping
     The payload stays plain, flat JSON. Each schema and field names the
     linked-data term it means with `x-schema-org`; the JSON-LD context served at
-    `GET /api/institutions.context.v1.jsonld` holds the same mapping.
+    `GET /api/v1/institutions.context.r1.jsonld` holds the same mapping.
 
     - The response is a [schema:ItemList](https://schema.org/ItemList) and each
       entry a [schema:Organization](https://schema.org/Organization). The
@@ -68,7 +69,7 @@ tags:
     description: Approved-institution registry
 
 paths:
-  /login/institutions:
+  /api/v1/institutions:
     get:
       tags: [institutions]
       operationId: listInstitutions
@@ -78,10 +79,28 @@ paths:
         so unapproved entries (for example, ones pending review) never appear
         in it.
 
-        It is meant for the login page on the same origin, so it sends no
-        CORS headers. Clients revalidate on every use (`Cache-Control: no-cache`);
-        when the data has a `version`, it doubles as the `ETag`, and a matching
+        Clients revalidate on every use (`Cache-Control: no-cache`); when the
+        data has a `version`, it doubles as the `ETag`, and a matching
         `If-None-Match` gets `304 Not Modified`.
+
+        Cross-origin reads are set per deployment by a list of allowed
+        origins (`scheme://host[:port]`), which is either empty, specific
+        origins, or `*` for any origin. Every response, including `304` and
+        errors, follows it:
+
+        - **Empty** (only clients on the same origin): no CORS headers.
+        - **Specific origins**: always `Vary: Origin`. When the request's
+          `Origin` exactly matches a listed origin, also
+          `Access-Control-Allow-Origin` set to that origin and
+          `Access-Control-Expose-Headers: ETag, Link`. Other origins get no
+          `Access-Control-*` headers.
+        - **`*`**: `Access-Control-Allow-Origin: *` and
+          `Access-Control-Expose-Headers: ETag, Link` on every response.
+
+        The list is public, so credentials are never allowed
+        (`Access-Control-Allow-Credentials` is never sent). A cross-origin
+        `GET` that sets `If-None-Match` itself is preceded by a preflight,
+        which `OPTIONS` answers.
       parameters:
         - name: If-None-Match
           in: header
@@ -98,15 +117,21 @@ paths:
               $ref: "#/components/headers/ListCacheControl"
             ETag:
               $ref: "#/components/headers/ETag"
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Expose-Headers:
+              $ref: "#/components/headers/CorsExposeHeaders"
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
             Link:
               description: |
                 Points JSON-LD processors at the context served by
-                `GET /api/institutions.context.v1.jsonld`, as an absolute URL:
-                `<{base_url}/api/institutions.context.v1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+                `GET /api/v1/institutions.context.r1.jsonld`, as an absolute URL:
+                `<{base_url}/api/v1/institutions.context.r1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
               required: true
               schema:
                 type: string
-              example: <https://tms.example.org/api/institutions.context.v1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+              example: <https://tms.example.org/api/v1/institutions.context.r1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
           content:
             application/json:
               schema:
@@ -148,14 +173,95 @@ paths:
               $ref: "#/components/headers/ListCacheControl"
             ETag:
               $ref: "#/components/headers/ETag"
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Expose-Headers:
+              $ref: "#/components/headers/CorsExposeHeaders"
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
         "500":
           description: The registry could not be read.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Expose-Headers:
+              $ref: "#/components/headers/CorsExposeHeaders"
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+    options:
+      tags: [institutions]
+      operationId: preflightInstitutions
+      summary: CORS preflight for the institutions list
+      description: |
+        Answers the preflight a browser sends before a cross-origin `GET`
+        that sets `If-None-Match`, by the same list of allowed origins as
+        `GET`:
 
-  /api/institutions.context.v1.jsonld:
+        - **Empty**: no CORS headers, so the browser blocks the `GET`.
+        - **Specific origins**: always `Vary: Origin`. A listed `Origin` also
+          gets `Access-Control-Allow-Origin` set to that origin and the
+          `Access-Control-Allow-*` and `Access-Control-Max-Age` headers
+          below; other origins get no `Access-Control-*` headers.
+        - **`*`**: `Access-Control-Allow-Origin: *` and the headers below.
+
+        The allowed method and header are fixed. The server need not check
+        `Access-Control-Request-Method` or `Access-Control-Request-Headers`:
+        the browser compares them against what the response allows.
+      parameters:
+        - name: Origin
+          in: header
+          required: false
+          description: Origin of the page making the cross-origin request.
+          schema:
+            type: string
+          example: https://portal.example.org
+        - name: Access-Control-Request-Method
+          in: header
+          required: false
+          description: Method of the request being preflighted.
+          schema:
+            type: string
+          example: GET
+        - name: Access-Control-Request-Headers
+          in: header
+          required: false
+          description: Non-safelisted headers the request will set.
+          schema:
+            type: string
+          example: if-none-match
+      responses:
+        "204":
+          description: The preflight answer; no body.
+          headers:
+            Allow:
+              description: Methods the list supports.
+              required: true
+              schema:
+                const: GET, HEAD, OPTIONS
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Allow-Methods:
+              description: Sent exactly when `Access-Control-Allow-Origin` is.
+              schema:
+                const: GET
+            Access-Control-Allow-Headers:
+              description: Sent exactly when `Access-Control-Allow-Origin` is.
+              schema:
+                const: If-None-Match
+            Access-Control-Max-Age:
+              description: |
+                Seconds the browser may reuse this answer. Sent exactly when
+                `Access-Control-Allow-Origin` is.
+              schema:
+                const: 7200
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
+
+  /api/v1/institutions.context.r1.jsonld:
     get:
       tags: [institutions]
       operationId: getInstitutionsContext
@@ -165,9 +271,13 @@ paths:
         Public and open to any origin (`Access-Control-Allow-Origin: *`), so
         JSON-LD processors on other sites can fetch it.
 
-        The version in the path names one fixed document: a changed context is
-        published under the next version, and the list's `Link` header moves to
-        it. A URL never changes content, so it may be cached indefinitely.
+        Contexts are revised separately from the API. `r<n>` in the path
+        names revision `n`, one fixed document: a changed context (for
+        example, mapping a field a later minor version adds) is published as
+        the next revision, `/api/v1/institutions.context.r<n+1>.jsonld`, and
+        the list's `Link` header moves to it. Earlier revisions stay served
+        unchanged for clients that cached a `Link` to them. A URL never
+        changes content, so it may be cached indefinitely.
       responses:
         "200":
           description: The JSON-LD context document.
@@ -204,6 +314,25 @@ components:
         type: string
         pattern: '^"[-!#-+.-~]{1,64}"$'
       example: '"2026-10-23.1"'
+    CorsAllowOrigin:
+      description: |
+        The request's `Origin` when the deployment allows it, or `*` when it
+        allows any origin. Absent otherwise.
+      schema:
+        type: string
+      example: https://portal.example.org
+    CorsExposeHeaders:
+      description: |
+        Lets cross-origin scripts read the `ETag` and `Link` headers. Sent
+        exactly when `Access-Control-Allow-Origin` is.
+      schema:
+        const: ETag, Link
+    VaryOrigin:
+      description: |
+        Sent when the deployment allows specific origins, since the CORS
+        headers then depend on the request's `Origin`.
+      schema:
+        const: Origin
 
   schemas:
     InstitutionsResponse:

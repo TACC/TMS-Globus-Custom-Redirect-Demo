@@ -20,7 +20,7 @@ pub enum Provider {
 }
 
 /// JSON-LD type of an entry (`type`, aliased to `@type` in
-/// api/institutions.context.v1.jsonld). Written out, never read from the registry.
+/// api/institutions.context.r1.jsonld). Written out, never read from the registry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum InstitutionType {
     #[default]

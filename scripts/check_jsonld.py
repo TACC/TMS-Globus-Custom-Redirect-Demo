@@ -8,6 +8,7 @@ schema:Organizations, with every field mapped and the envelope left out.
 
 import json
 import pathlib
+import re
 import sys
 
 import yaml
@@ -19,8 +20,13 @@ SCHEMA = "https://schema.org/"
 TMS = "https://tacc.utexas.edu/ns/tms#"
 
 spec = yaml.safe_load((ROOT / "api/openapi.yaml").read_text())
-context = json.loads((ROOT / "api/institutions.context.v1.jsonld").read_text())
-examples = spec["paths"]["/login/institutions"]["get"]["responses"]["200"]["content"]["application/json"]["examples"]
+list_200 = spec["paths"]["/api/v1/institutions"]["get"]["responses"]["200"]
+# The context revision the spec's Link header example names.
+link = re.search(r"/api/v1/institutions\.context\.r(\d+)\.jsonld>", list_200["headers"]["Link"]["example"])
+if not link:
+    sys.exit("JSON-LD check failed: the spec's Link example names no context revision")
+context = json.loads((ROOT / f"api/institutions.context.r{link[1]}.jsonld").read_text())
+examples = list_200["content"]["application/json"]["examples"]
 
 failures = []
 for name, example in examples.items():
@@ -56,4 +62,4 @@ for name, example in examples.items():
 
 if failures:
     sys.exit("JSON-LD check failed:\n  " + "\n  ".join(failures))
-print(f"JSON-LD check passed for {len(examples)} example(s).")
+print(f"JSON-LD check passed for {len(examples)} example(s) with context r{link[1]}.")

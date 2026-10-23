@@ -8,9 +8,10 @@
 //!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
 //!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
-//!   GET /login/institutions     the approved institutions (from the mocked registry), with a Link
+//!   GET /api/v1/institutions    the approved institutions (from the mocked registry), with a Link
 //!                               header naming the JSON-LD context (see institutions_api.rs)
-//!   GET /api/institutions.context.v1.jsonld  that JSON-LD context
+//!   OPTIONS /api/v1/institutions  CORS preflight for that list (see CORS_ALLOWED_ORIGINS)
+//!   GET /api/v1/institutions.context.r1.jsonld  that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks
@@ -96,6 +97,10 @@ async fn main() {
     }
     let bind = env.or("BIND_ADDR", "127.0.0.1:8080");
     let inst_file = env.or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
+    let cors = institutions_api::Cors::parse(&env.or("CORS_ALLOWED_ORIGINS", "")).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
 
     // Real Globus Auth unless the offline mock is asked for explicitly, so a
     // missing credential fails loudly instead of quietly serving the mock.
@@ -188,7 +193,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(landing))
         .route("/demo", get(index))
-        .merge(institutions_api::router(registry, base_url.clone()))
+        .merge(institutions_api::router(registry, base_url.clone(), cors))
         .route("/login", get(login))
         .route("/login/callback", get(callback))
         .route("/login/status", get(login_status))
