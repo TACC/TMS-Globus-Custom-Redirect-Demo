@@ -38,7 +38,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
-use institutions::{identity_matches, Institution, Provider, Registry};
+use institutions::{identity_matches, Institution, ListType, Provider, Registry};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -239,7 +239,14 @@ async fn index() -> Html<&'static str> {
 async fn list_institutions(State(app): State<AppState>) -> Response {
     // Unapproved entries are listed too (the page offers only approved ones);
     // /login still refuses them.
-    tapis_style(StatusCode::OK, "Institutions.", json!(app.registry.all()))
+    // `type` makes the list a schema:ItemList under api/institutions.context.jsonld.
+    Json(json!({
+        "type": ListType::ItemList,
+        "status": "success",
+        "message": "Institutions.",
+        "result": app.registry.all(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

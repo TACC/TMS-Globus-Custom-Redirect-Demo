@@ -80,43 +80,34 @@ paths:
                 mock:
                   summary: mock/approved_institutions.json (abridged)
                   value:
+                    type: ItemList
                     status: success
                     message: Approved institutions retrieved.
                     version: mock-0.1.0
                     result:
-                      - id: globus
+                      - type: Organization
+                        id: globus
                         name: Globus (default login, no redirect)
                         provider: globus
                         redirect_idp_domain: null
                         approved: true
-                      - id: uchicago
+                      - type: Organization
+                        id: uchicago
                         name: University of Chicago
                         redirect_idp_domain: uchicago.edu
                         idp_logout_url: https://uchicago.okta.com/login/signout
                         approved: true
-                      - id: tacc_tapis
+                      - type: Organization
+                        id: tacc_tapis
                         name: Tapis OAuth2 (TaccTapis)
                         provider: tacc_tapis
                         redirect_idp_domain: null
                         approved: true
-                      - id: example
+                      - type: Organization
+                        id: example
                         name: Example University (pending review)
                         redirect_idp_domain: example.edu
                         approved: false
-                typed:
-                  summary: With JSON-LD types
-                  value:
-                    type: ItemList
-                    status: success
-                    message: Approved institutions retrieved.
-                    result:
-                      - type: Organization
-                        id: uchicago
-                        name: University of Chicago
-                        provider: globus
-                        redirect_idp_domain: uchicago.edu
-                        idp_logout_url: https://uchicago.okta.com/login/signout
-                        approved: true
         "500":
           description: The registry could not be read.
           content:

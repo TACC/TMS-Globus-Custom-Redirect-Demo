@@ -18,8 +18,25 @@ pub enum Provider {
     TaccTapis,
 }
 
+/// JSON-LD type of an entry (`type`, aliased to `@type` in
+/// api/institutions.context.jsonld). Optional in the input, always written out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstitutionType {
+    #[default]
+    Organization,
+}
+
+/// JSON-LD type of the list as a whole.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListType {
+    #[default]
+    ItemList,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Institution {
+    #[serde(rename = "type", default)]
+    pub kind: InstitutionType,
     /// Stable id used by the UI (`/login?institution=<id>`).
     pub id: String,
     pub name: String,
@@ -41,6 +58,8 @@ pub struct Institution {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstitutionsResponse {
+    #[serde(rename = "type", default)]
+    pub kind: ListType,
     pub status: String,
     pub message: String,
     pub version: String,
@@ -133,6 +152,20 @@ mod tests {
         let tapis = reg.find("tacc_tapis").unwrap();
         assert_eq!(tapis.provider, Provider::TaccTapis);
         assert!(identity_matches(tapis, "jdoe@tacc"));
+    }
+
+    #[test]
+    fn json_ld_types_are_optional_and_always_written() {
+        let reg = Registry::from_json(MOCK).unwrap();
+        let out = serde_json::to_value(reg.find("uchicago").unwrap()).unwrap();
+        assert_eq!(out["type"], "Organization");
+
+        let untyped = r#"{"status":"success","message":"","version":"","result":[{"id":"a","name":"A","approved":true}]}"#;
+        let reg = Registry::from_json(untyped).unwrap();
+        assert_eq!(reg.find("a").unwrap().kind, InstitutionType::Organization);
+
+        let wrong = r#"{"status":"success","message":"","version":"","result":[{"type":"Thing","id":"a","name":"A","approved":true}]}"#;
+        assert!(Registry::from_json(wrong).is_err());
     }
 
     #[test]
