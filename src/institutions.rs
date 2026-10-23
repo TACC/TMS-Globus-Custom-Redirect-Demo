@@ -88,9 +88,9 @@ impl Registry {
         self.institutions.iter().filter(|i| i.approved).cloned().collect()
     }
 
-    /// Every institution, approved or not, for display.
-    pub fn all(&self) -> &[Institution] {
-        &self.institutions
+    #[cfg(test)]
+    fn all_ids_valid(&self) -> bool {
+        self.institutions.iter().all(|i| is_valid_id(&i.id))
     }
 
     /// Lookup by id, approved or not: unapproved institutions can sign in, and
@@ -99,6 +99,13 @@ impl Registry {
     pub fn find(&self, id: &str) -> Option<&Institution> {
         self.institutions.iter().find(|i| i.id == id)
     }
+}
+
+/// Whether `id` has the shape api/openapi.yaml gives institution ids
+/// (`^[a-z0-9_]+$`), so a malformed one can be refused as a bad request
+/// rather than looked up.
+pub fn is_valid_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// `redirect_idp_domain` only changes what the user *sees* (it skips the Globus
@@ -168,6 +175,15 @@ mod tests {
 
         let wrong = r#"{"status":"success","message":"","version":"","result":[{"type":"Thing","id":"a","name":"A","approved":true}]}"#;
         assert!(Registry::from_json(wrong).is_err());
+    }
+
+    #[test]
+    fn ids_must_match_the_spec_pattern() {
+        let reg = Registry::from_json(MOCK).unwrap();
+        assert!(reg.all_ids_valid());
+        for bad in ["", "UChicago", "u chicago", "uchicago.edu", "../x"] {
+            assert!(!is_valid_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

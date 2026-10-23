@@ -15,13 +15,14 @@ addition being `redirect_idp_domain`.
 
 ## What it shows
 
-1. `GET /login/institutions` serves every entry of
-   `mock/approved_institutions.json` with its `approved` flag (Tapis-style
-   envelope: `status / message / version / result`). The page shows
-   `approved: false` entries greyed out with a "not approved" tag. Their
-   **Log in** does not start a login: `/login` answers with a **Filtered**
-   page (laid out like **Welcome**, with the institution's details) explaining
-   that it is not on the approved list, and never redirects to Globus or Tapis.
+1. `GET /login/institutions` serves the approved entries of
+   `mock/approved_institutions.json` (Tapis-style envelope:
+   `status / message / version / result`). The list is public, so
+   `approved: false` entries are left out of it. They stay in the registry:
+   `/login?institution=<id>` for one of them does not start a login but
+   answers with a **Filtered** page (laid out like **Welcome**, with the
+   institution's details) explaining that it is not on the approved list,
+   and never redirects to Globus or Tapis.
 2. `GET /login?institution=tacc` looks the id up in that list (unknown ids
    get a 403, unapproved ones the **Filtered** page), then redirects to:
 
@@ -108,8 +109,9 @@ entries sign out of Okta, which is what asks for the password; the proxy
 may still sign you in silently while its own session lasts. SDSC has no IdP
 of its own in Globus (`sdsc.edu` stops at the organization picker), so its
 entry uses UC San Diego's `ucsd.edu`, and SDSC users come back as
-`@ucsd.edu` identities. USC and MIT are listed but not approved: their
-Globus details are real, but **Log in** shows the **Filtered** page.
+`@ucsd.edu` identities. USC and MIT are in the registry but not approved:
+their Globus details are real, but they are left out of the public list and
+`/login?institution=usc` shows the **Filtered** page.
 
 ## The test IdP (`src/test_idp.rs`)
 

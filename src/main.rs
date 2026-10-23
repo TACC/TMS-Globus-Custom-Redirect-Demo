@@ -8,7 +8,9 @@
 //!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
 //!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
-//!   GET /login/institutions     all institutions with their `approved` flag (from the mocked JSON)
+//!   GET /login/institutions     the approved institutions (from the mocked JSON), with a Link
+//!                               header naming the JSON-LD context
+//!   GET /api/institutions.context.jsonld  that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks
@@ -29,8 +31,8 @@ mod tapis;
 mod test_idp;
 
 use axum::{
-    extract::{Query, RawQuery, State},
-    http::StatusCode,
+    extract::{rejection::QueryRejection, Query, RawQuery, State},
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -38,7 +40,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
-use institutions::{identity_matches, Institution, ListType, Provider, Registry};
+use institutions::{identity_matches, is_valid_id, Institution, ListType, Provider, Registry};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,6 +52,7 @@ use tower_http::services::ServeDir;
 
 const STATE_COOKIE: &str = "idp_demo_state";
 const SESSION_COOKIE: &str = "idp_demo_session";
+const CONTEXT_PATH: &str = "/api/institutions.context.jsonld";
 
 #[derive(Clone)]
 struct AppState {
@@ -180,6 +183,7 @@ async fn main() {
         .route("/", get(landing))
         .route("/demo", get(index))
         .route("/login/institutions", get(list_institutions))
+        .route(CONTEXT_PATH, get(institutions_context))
         .route("/login", get(login))
         .route("/login/callback", get(callback))
         .route("/login/status", get(login_status))
@@ -237,16 +241,36 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn list_institutions(State(app): State<AppState>) -> Response {
-    // Unapproved entries are listed too (the page offers only approved ones);
-    // /login still refuses them.
-    // `type` makes the list a schema:ItemList under api/institutions.context.jsonld.
-    Json(json!({
-        "type": ListType::ItemList,
-        "status": "success",
-        "message": "Institutions.",
-        "result": app.registry.all(),
-    }))
-    .into_response()
+    // Public, so unapproved entries stay out of it; /login still knows them
+    // and answers with the Filtered page.
+    // `type` makes the list a schema:ItemList under api/institutions.context.jsonld,
+    // and the Link header tells JSON-LD processors where that context is.
+    let link = format!(
+        r#"<{}{CONTEXT_PATH}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#,
+        app.base_url
+    );
+    (
+        [(header::LINK, link)],
+        Json(json!({
+            "type": ListType::ItemList,
+            "status": "success",
+            "message": "Approved institutions.",
+            "result": app.registry.approved(),
+        })),
+    )
+        .into_response()
+}
+
+/// The JSON-LD context named by /login/institutions' Link header. Open to any
+/// origin, since JSON-LD processors in other sites' pages fetch it too.
+async fn institutions_context() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/ld+json"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        include_str!("../api/institutions.context.jsonld"),
+    )
 }
 
 #[derive(Deserialize)]
@@ -259,8 +283,19 @@ struct LoginParams {
 async fn login(
     State(app): State<AppState>,
     jar: CookieJar,
-    Query(p): Query<LoginParams>,
+    query: Result<Query<LoginParams>, QueryRejection>,
 ) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return tapis_style(StatusCode::BAD_REQUEST, &e.body_text(), json!(null)),
+    };
+    if !is_valid_id(&p.institution) {
+        return tapis_style(
+            StatusCode::BAD_REQUEST,
+            &format!("Institution id '{}' is malformed: use lower-case letters, digits and _.", p.institution),
+            json!(null),
+        );
+    }
     let Some(inst) = app.registry.find(&p.institution) else {
         return tapis_style(
             StatusCode::FORBIDDEN,
@@ -498,10 +533,15 @@ struct LogoutIdpParams {
 
 /// Second hop of an institution logout. Only redirects to a URL from the
 /// institutions list, so it cannot be used as an open redirect.
-async fn logout_idp(State(app): State<AppState>, Query(p): Query<LogoutIdpParams>) -> Redirect {
+async fn logout_idp(State(app): State<AppState>, query: Result<Query<LogoutIdpParams>, QueryRejection>) -> Response {
+    let p = match query {
+        Ok(Query(p)) if is_valid_id(&p.institution) => p,
+        Ok(_) => return page_error(StatusCode::BAD_REQUEST, "Malformed institution id.").into_response(),
+        Err(e) => return page_error(StatusCode::BAD_REQUEST, &e.body_text()).into_response(),
+    };
     match app.registry.find(&p.institution).and_then(|i| i.idp_logout_url.as_deref()) {
-        Some(url) => Redirect::to(url),
-        None => Redirect::to("/"),
+        Some(url) => Redirect::to(url).into_response(),
+        None => Redirect::to("/").into_response(),
     }
 }
 
@@ -512,7 +552,15 @@ struct LogoutParams {
     local: bool,
 }
 
-async fn logout(State(app): State<AppState>, jar: CookieJar, Query(p): Query<LogoutParams>) -> Response {
+async fn logout(
+    State(app): State<AppState>,
+    jar: CookieJar,
+    query: Result<Query<LogoutParams>, QueryRejection>,
+) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return tapis_style(StatusCode::BAD_REQUEST, &e.body_text(), json!(null)),
+    };
     let session = jar
         .get(SESSION_COOKIE)
         .and_then(|c| app.sessions.lock().unwrap().remove(c.value()));
@@ -549,7 +597,14 @@ struct MockAuthorizeParams {
     scope: Option<String>,
 }
 
-async fn mock_authorize(State(app): State<AppState>, Query(p): Query<MockAuthorizeParams>) -> Response {
+async fn mock_authorize(
+    State(app): State<AppState>,
+    query: Result<Query<MockAuthorizeParams>, QueryRejection>,
+) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return page_error(StatusCode::BAD_REQUEST, &e.body_text()).into_response(),
+    };
     let domain = p.redirect_idp_domain.clone().unwrap_or_default();
 
     // What Globus does once an IdP is registered for the domain: send the user
@@ -615,7 +670,14 @@ struct MockIdpCallbackParams {
 
 /// Mock Globus receiving the test IdP's response: redeem the code exactly as a
 /// real client would, then hand the verified identity back to the app.
-async fn mock_idp_callback(State(app): State<AppState>, Query(p): Query<MockIdpCallbackParams>) -> Response {
+async fn mock_idp_callback(
+    State(app): State<AppState>,
+    query: Result<Query<MockIdpCallbackParams>, QueryRejection>,
+) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return page_error(StatusCode::BAD_REQUEST, &e.body_text()).into_response(),
+    };
     let relay: Option<serde_json::Value> = URL_SAFE_NO_PAD
         .decode(&p.state)
         .ok()
@@ -658,7 +720,11 @@ struct MockApproveParams {
     username: String,
 }
 
-async fn mock_approve(Query(p): Query<MockApproveParams>) -> Response {
+async fn mock_approve(query: Result<Query<MockApproveParams>, QueryRejection>) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return page_error(StatusCode::BAD_REQUEST, &e.body_text()).into_response(),
+    };
     let Ok(mut url) = url::Url::parse(&p.redirect_uri) else {
         return page_error(StatusCode::BAD_REQUEST, "Bad redirect_uri").into_response();
     };

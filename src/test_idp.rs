@@ -19,7 +19,10 @@
 //! can be exercised offline before it is registered.
 
 use axum::{
-    extract::{Query, State},
+    extract::{
+        rejection::{FormRejection, QueryRejection},
+        Query, State,
+    },
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
@@ -228,8 +231,12 @@ struct AuthorizeParams {
 async fn login_page(
     State(idp): State<Arc<TestIdp>>,
     headers: HeaderMap,
-    Query(p): Query<AuthorizeParams>,
+    query: Result<Query<AuthorizeParams>, QueryRejection>,
 ) -> Response {
+    let p = match query {
+        Ok(Query(p)) => p,
+        Err(e) => return error_page(StatusCode::BAD_REQUEST, &e.body_text()),
+    };
     // Validate before showing anything: never bounce users to an unregistered redirect_uri.
     if let Err(e) = idp.check_client(&p.client_id, &p.redirect_uri) {
         return error_page(StatusCode::BAD_REQUEST, &e);
@@ -281,7 +288,11 @@ struct LoginForm {
     username: String,
 }
 
-async fn login_submit(State(idp): State<Arc<TestIdp>>, Form(f): Form<LoginForm>) -> Response {
+async fn login_submit(State(idp): State<Arc<TestIdp>>, form: Result<Form<LoginForm>, FormRejection>) -> Response {
+    let f = match form {
+        Ok(Form(f)) => f,
+        Err(e) => return error_page(StatusCode::BAD_REQUEST, &e.body_text()),
+    };
     if let Err(e) = idp.check_client(&f.client_id, &f.redirect_uri) {
         return error_page(StatusCode::BAD_REQUEST, &e);
     }
@@ -326,7 +337,16 @@ fn client_credentials(headers: &HeaderMap, f: &TokenForm) -> Option<(String, Str
     basic.or_else(|| Some((f.client_id.clone()?, f.client_secret.clone()?)))
 }
 
-async fn token(State(idp): State<Arc<TestIdp>>, headers: HeaderMap, Form(f): Form<TokenForm>) -> Response {
+async fn token(
+    State(idp): State<Arc<TestIdp>>,
+    headers: HeaderMap,
+    form: Result<Form<TokenForm>, FormRejection>,
+) -> Response {
+    // RFC 6749 section 5.2: a malformed request is 400 invalid_request.
+    let f = match form {
+        Ok(Form(f)) => f,
+        Err(e) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", &e.body_text()),
+    };
     let Some((client_id, secret)) = client_credentials(&headers, &f) else {
         return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", "missing client credentials");
     };

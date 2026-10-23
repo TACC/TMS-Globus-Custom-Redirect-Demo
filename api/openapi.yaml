@@ -4,8 +4,8 @@ info:
   version: 0.3.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
-    One read-only endpoint listing every institution a user can sign in
-    through, the IdP each one steers to, and whether login is approved.
+    One read-only endpoint listing the approved institutions a user can sign
+    in through, and the IdP each one steers to.
 
     Responses use the Tapis-style envelope `{ status, message, version, result }`.
 
@@ -62,20 +62,24 @@ paths:
     get:
       tags: [institutions]
       operationId: listInstitutions
-      summary: List every institution with its IdP data and approval flag
+      summary: List the approved institutions with their IdP data
       description: |
-        Returns approved and unapproved entries alike, in registry order. The
-        UI offers only approved ones, and login refuses the rest.
+        Returns approved entries only, in registry order. The list is public,
+        so unapproved entries (for example, ones pending review) never appear
+        in it; login still refuses them if asked for by id.
       responses:
         "200":
-          description: All known institutions.
+          description: The approved institutions.
           headers:
             Link:
               description: |
-                Optional. Points JSON-LD processors at the context, e.g.
-                `<api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+                Points JSON-LD processors at the context served by
+                `GET /api/institutions.context.jsonld`, as an absolute URL:
+                `<{base_url}/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+              required: true
               schema:
                 type: string
+              example: <http://localhost:8080/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
           content:
             application/json:
               schema:
@@ -86,7 +90,7 @@ paths:
                   value:
                     type: ItemList
                     status: success
-                    message: Approved institutions retrieved.
+                    message: Approved institutions.
                     version: mock-0.1.0
                     result:
                       - type: Organization
@@ -110,19 +114,35 @@ paths:
                         redirect_idp_domain: null
                         idp_logout_url: null
                         approved: true
-                      - type: Organization
-                        id: example
-                        name: Example University (pending review)
-                        provider: globus
-                        redirect_idp_domain: example.edu
-                        idp_logout_url: null
-                        approved: false
         "500":
           description: The registry could not be read.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /api/institutions.context.jsonld:
+    get:
+      tags: [institutions]
+      operationId: getInstitutionsContext
+      summary: The JSON-LD context for the institutions list
+      description: |
+        Maps the list's plain JSON fields to schema.org and `tms:` terms.
+        Public and open to any origin (`Access-Control-Allow-Origin: *`), so
+        JSON-LD processors on other sites can fetch it.
+      responses:
+        "200":
+          description: The JSON-LD context document.
+          headers:
+            Access-Control-Allow-Origin:
+              required: true
+              schema:
+                const: "*"
+          content:
+            application/ld+json:
+              schema:
+                type: object
+                required: ["@context"]
 
 components:
   schemas:
@@ -151,9 +171,9 @@ components:
         result:
           type: array
           description: |
-            Every institution, approved or not, in registry order. Each `id`
-            appears at most once; the server must enforce this, since JSON
-            Schema cannot.
+            The approved institutions, in registry order. Each `id` appears
+            at most once; the server must enforce this, since JSON Schema
+            cannot.
           items:
             $ref: "#/components/schemas/Institution"
           x-schema-org: schema:itemListElement
@@ -230,7 +250,10 @@ components:
           x-schema-org: tms:idpLogoutUrl
         approved:
           type: boolean
-          description: Whether login may proceed for this institution.
+          description: |
+            Whether login may proceed for this institution. The schema allows
+            `false` so the same shape fits the full registry, but the public
+            listing leaves unapproved entries out.
           x-schema-org: tms:approved
           x-schema-org-related: [schema:Certification, schema:certificationStatus]
 
