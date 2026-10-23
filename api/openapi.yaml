@@ -4,15 +4,16 @@ info:
   version: 0.3.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
-    One read-only endpoint listing the approved institutions a user can sign
-    in through, and the IdP each one steers to.
+    Two read-only endpoints: the list of approved institutions a user can
+    sign in through, with the IdP each one steers to, and the JSON-LD context
+    that maps that list to schema.org.
 
-    Responses use the Tapis-style envelope `{ status, message, version, result }`.
+    The list uses the Tapis-style envelope `{ type, status, message, version, result }`.
 
     ### schema.org mapping
     The payload stays plain, flat JSON. Each schema and field names the
     linked-data term it means with `x-schema-org`; the JSON-LD context served at
-    `GET /api/institutions.context.jsonld` holds the same mapping.
+    `GET /api/institutions.context.v1.jsonld` holds the same mapping.
 
     - The response is a [schema:ItemList](https://schema.org/ItemList) and each
       entry a [schema:Organization](https://schema.org/Organization). The
@@ -41,6 +42,9 @@ info:
     ### Compatibility
     Later minor versions may add fields to any object. Clients must ignore
     fields they do not recognise.
+  contact:
+    name: TACC
+    url: https://tacc.utexas.edu
   license:
     name: Proprietary
 externalDocs:
@@ -97,12 +101,12 @@ paths:
             Link:
               description: |
                 Points JSON-LD processors at the context served by
-                `GET /api/institutions.context.jsonld`, as an absolute URL:
-                `<{base_url}/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+                `GET /api/institutions.context.v1.jsonld`, as an absolute URL:
+                `<{base_url}/api/institutions.context.v1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
               required: true
               schema:
                 type: string
-              example: <https://tms.example.org/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+              example: <https://tms.example.org/api/institutions.context.v1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
           content:
             application/json:
               schema:
@@ -151,7 +155,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/institutions.context.jsonld:
+  /api/institutions.context.v1.jsonld:
     get:
       tags: [institutions]
       operationId: getInstitutionsContext
@@ -159,8 +163,11 @@ paths:
       description: |
         Maps the list's plain JSON fields to schema.org and `tms:` terms.
         Public and open to any origin (`Access-Control-Allow-Origin: *`), so
-        JSON-LD processors on other sites can fetch it. It changes only with
-        this API's version, so it may be cached for a day.
+        JSON-LD processors on other sites can fetch it.
+
+        The version in the path names one fixed document: a changed context is
+        published under the next version, and the list's `Link` header moves to
+        it. A URL never changes content, so it may be cached indefinitely.
       responses:
         "200":
           description: The JSON-LD context document.
@@ -172,7 +179,7 @@ paths:
             Cache-Control:
               required: true
               schema:
-                const: public, max-age=86400
+                const: public, max-age=31536000, immutable
           content:
             application/ld+json:
               schema:
@@ -195,7 +202,7 @@ components:
         `version` is.
       schema:
         type: string
-        pattern: '^"[!#-~]{1,64}"$'
+        pattern: '^"[-!#-+.-~]{1,64}"$'
       example: '"2026-10-23.1"'
 
   schemas:
@@ -222,11 +229,12 @@ components:
           description: |
             Revision of the institution data (not of this API), so a client can
             tell when the list has changed. Opaque; it is also the response's
-            `ETag`, so it is limited to characters an `ETag` allows. Optional;
-            readers must not require it.
+            `ETag`, so it is limited to visible ASCII other than `"` (not
+            allowed in an `ETag`) and `,` (which separates tags in
+            `If-None-Match`). Optional; readers must not require it.
           minLength: 1
           maxLength: 64
-          pattern: "^[!#-~]+$"
+          pattern: "^[-!#-+.-~]+$"
           examples: ["2026-10-23.1"]
         result:
           type: array
@@ -283,6 +291,8 @@ components:
           type: string
           minLength: 1
           maxLength: 256
+          # At least one character that is not white space.
+          pattern: '\S'
           description: Display name.
           examples: [University of Chicago]
           x-schema-org: schema:name
@@ -293,8 +303,9 @@ components:
           format: hostname
           maxLength: 253
           # Two or more dot-separated labels of lower-case letters, digits and
-          # inner hyphens, each 1-63 characters.
-          pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          # inner hyphens, each 1-63 characters. The last (top-level) label
+          # starts with a letter, which rules out IP addresses.
+          pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
           description: |
             Domain Globus associates with the institution's IdP, in lower case,
             passed verbatim as `redirect_idp_domain` on the authorize request.
@@ -308,7 +319,8 @@ components:
           type: [string, "null"]
           format: uri
           maxLength: 2048
-          pattern: "^https://"
+          # https, a non-empty host, and no white space anywhere.
+          pattern: '^https://[^/?#\s]+([/?#]\S*)?$'
           description: |
             Sign-out URL of the institution's own IdP. Globus does not pass
             `prompt=login` on to the IdP, so ending the IdP's session is the

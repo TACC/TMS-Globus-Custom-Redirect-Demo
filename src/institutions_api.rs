@@ -1,7 +1,7 @@
 //! The public institutions API, as specified in api/openapi.yaml:
 //!
 //!   GET /login/institutions               the approved institutions
-//!   GET /api/institutions.context.jsonld  the JSON-LD context for that list
+//!   GET /api/institutions.context.v1.jsonld  the JSON-LD context for that list
 //!
 //! Kept apart from the demo's login flow so it depends only on the registry
 //! and the deployment's base URL.
@@ -18,8 +18,10 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub const LIST_PATH: &str = "/login/institutions";
-pub const CONTEXT_PATH: &str = "/api/institutions.context.jsonld";
-const CONTEXT: &str = include_str!("../api/institutions.context.jsonld");
+/// Versioned: a published context never changes, so a changed one gets the
+/// next version (a new file and path) and the list's Link header moves to it.
+pub const CONTEXT_PATH: &str = "/api/institutions.context.v1.jsonld";
+const CONTEXT: &str = include_str!("../api/institutions.context.v1.jsonld");
 
 #[derive(Clone)]
 struct ApiState {
@@ -78,13 +80,13 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
 }
 
 /// Open to any origin, since JSON-LD processors in other sites' pages fetch
-/// it too. It only changes with the API, so it can be cached for a day.
+/// it too. Its URL never changes content, so it can be cached indefinitely.
 async fn institutions_context() -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, "application/ld+json"),
             (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         CONTEXT,
     )
@@ -103,6 +105,8 @@ mod tests {
     const SPEC: &str = include_str!("../api/openapi.yaml");
     const MOCK: &str = include_str!("../mock/approved_institutions.json");
     const BASE: &str = "https://tms.example.org";
+    /// SHA-256 of api/institutions.context.v1.jsonld, line endings normalised.
+    const CONTEXT_V1_SHA256: &str = "0c053922807aef6eb421cffc9fe70b6dc266886907109972530d2d44a6851f93";
 
     fn spec() -> Value {
         serde_yaml::from_str(SPEC).expect("api/openapi.yaml parses")
@@ -145,7 +149,7 @@ mod tests {
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
         assert_eq!(
             header(&headers, header::LINK),
-            Some(r#"<https://tms.example.org/api/institutions.context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#)
+            Some(r#"<https://tms.example.org/api/institutions.context.v1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#)
         );
         assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-cache"));
         assert_eq!(header(&headers, header::ETAG), Some("\"mock-0.1.0\""));
@@ -198,9 +202,21 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
         assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
-        assert_eq!(header(&headers, header::CACHE_CONTROL), Some("public, max-age=86400"));
+        assert_eq!(header(&headers, header::CACHE_CONTROL), Some("public, max-age=31536000, immutable"));
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert!(body["@context"].is_object());
+    }
+
+    /// v1 is published and cached indefinitely, so its content is frozen. To
+    /// change the context, add api/institutions.context.v2.jsonld, point
+    /// CONTEXT_PATH and the spec at it, and give this test the new file.
+    #[test]
+    fn published_context_does_not_change() {
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(CONTEXT.replace("\r\n", "\n").as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(digest, CONTEXT_V1_SHA256, "the v1 context changed: publish it as v2 instead");
+        let spec = spec();
+        assert!(spec["paths"].get(CONTEXT_PATH).is_some(), "spec documents {CONTEXT_PATH}");
     }
 
     #[test]
@@ -225,9 +241,13 @@ mod tests {
             ("id", json!("A")),
             ("id", json!("a".repeat(65))),
             ("name", json!("")),
+            ("name", json!("   ")),
             ("redirect_idp_domain", json!("..")),
             ("redirect_idp_domain", json!("UChicago.edu")),
+            ("redirect_idp_domain", json!("10.0.0.1")),
             ("idp_logout_url", json!("http://idp.a.edu/logout")),
+            ("idp_logout_url", json!("https://")),
+            ("idp_logout_url", json!("https://idp.a.edu/log out")),
             ("approved", json!(false)),
             ("type", json!("Thing")),
         ] {
@@ -238,6 +258,13 @@ mod tests {
         let mut tapis = good.clone();
         tapis["provider"] = json!("tacc_tapis");
         assert!(!v.is_valid(&tapis), "tacc_tapis with a domain");
+
+        let list = validator("InstitutionsResponse");
+        let response = |version: &str| json!({ "type": "ItemList", "status": "success", "message": "", "version": version, "result": [] });
+        assert!(list.is_valid(&response("2026-10-23.1")));
+        for bad in ["a,b", "a\"b", "a b", ""] {
+            assert!(!list.is_valid(&response(bad)), "version {bad:?}");
+        }
     }
 
     /// Every field the spec maps with `x-schema-org` must map to the same term

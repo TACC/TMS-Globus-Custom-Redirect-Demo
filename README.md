@@ -265,7 +265,7 @@ Set in `dev.env` (template: `dev.env.example`); environment variables override.
 
 | Setting                 | Default                                            |
 |-------------------------|----------------------------------------------------|
-| `BASE_URL`              | `http://localhost:8080`                            |
+| `BASE_URL`              | `http://localhost:8080` (no trailing `/`)          |
 | `BIND_ADDR`             | `127.0.0.1:8080`                                   |
 | `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
 | `GLOBUS_CLIENT_ID`      | required unless `GLOBUS_MOCK=true`                 |
@@ -317,6 +317,11 @@ endpoints and validate the responses against the schemas in
 maps with `x-schema-org` maps to the same term in the JSON-LD context.
 `scripts/check_jsonld.py` expands the spec's example with that context and
 checks the resulting RDF.
+
+The context is versioned (`api/institutions.context.v1.jsonld`, served at
+`/api/institutions.context.v1.jsonld`) and cached indefinitely, so a published
+version never changes; a test fails if it does. To change the context, add
+the next version and point `CONTEXT_PATH` and the spec at it.
 
 The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike

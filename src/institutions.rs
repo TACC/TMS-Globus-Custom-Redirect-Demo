@@ -20,7 +20,7 @@ pub enum Provider {
 }
 
 /// JSON-LD type of an entry (`type`, aliased to `@type` in
-/// api/institutions.context.jsonld). Written out, never read from the registry.
+/// api/institutions.context.v1.jsonld). Written out, never read from the registry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum InstitutionType {
     #[default]
@@ -89,7 +89,7 @@ impl Registry {
     fn validate(&self) -> Result<(), String> {
         if let Some(v) = &self.version {
             if !is_valid_version(v) {
-                return Err(format!("version {v:?} must be 1-64 visible ASCII characters other than '\"'"));
+                return Err(format!("version {v:?} must be 1-64 visible ASCII characters other than '\"' and ','"));
             }
         }
         let mut seen = HashSet::new();
@@ -101,8 +101,8 @@ impl Registry {
             if !seen.insert(id.as_str()) {
                 return Err(format!("id {id:?} appears more than once"));
             }
-            if i.name.is_empty() || i.name.chars().count() > 256 {
-                return Err(format!("{id}: name must be 1-256 characters"));
+            if i.name.trim().is_empty() || i.name.chars().count() > 256 {
+                return Err(format!("{id}: name must be 1-256 characters, not all white space"));
             }
             match (&i.redirect_idp_domain, i.provider) {
                 (Some(_), Provider::TaccTapis) => {
@@ -114,8 +114,8 @@ impl Registry {
                 _ => {}
             }
             if let Some(u) = &i.idp_logout_url {
-                if u.len() > 2048 || !u.starts_with("https://") || url::Url::parse(u).is_err() {
-                    return Err(format!("{id}: idp_logout_url {u:?} must be an https URL of at most 2048 bytes"));
+                if u.len() > 2048 || !u.starts_with("https://") || u.contains(char::is_whitespace) || url::Url::parse(u).is_err() {
+                    return Err(format!("{id}: idp_logout_url {u:?} must be an https URL of at most 2048 bytes, without white space"));
                 }
             }
         }
@@ -148,7 +148,8 @@ pub fn is_valid_id(id: &str) -> bool {
 }
 
 /// The spec's `redirect_idp_domain` pattern: two or more labels of lower-case
-/// letters, digits and inner hyphens, each 1-63 long, 253 at most in all.
+/// letters, digits and inner hyphens, each 1-63 long, 253 at most in all. The
+/// top-level label starts with a letter, so an IP address does not pass.
 fn is_valid_domain(d: &str) -> bool {
     let label_ok = |l: &str| {
         (1..=63).contains(&l.len())
@@ -156,13 +157,15 @@ fn is_valid_domain(d: &str) -> bool {
             && !l.starts_with('-')
             && !l.ends_with('-')
     };
-    d.len() <= 253 && d.split('.').count() >= 2 && d.split('.').all(label_ok)
+    let tld_ok = d.rsplit('.').next().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_lowercase()));
+    d.len() <= 253 && d.split('.').count() >= 2 && d.split('.').all(label_ok) && tld_ok
 }
 
-/// The spec's `version` pattern (`^[!#-~]+$`, 1-64 long): usable inside a
-/// quoted `ETag`.
+/// The spec's `version` pattern (1-64 visible ASCII characters other than `"`
+/// and `,`): usable inside a quoted `ETag`, and never split apart by the commas
+/// that separate tags in `If-None-Match`.
 fn is_valid_version(v: &str) -> bool {
-    (1..=64).contains(&v.len()) && v.bytes().all(|b| b == b'!' || (b'#'..=b'~').contains(&b))
+    (1..=64).contains(&v.len()) && v.bytes().all(|b| (b'!'..=b'~').contains(&b) && b != b'"' && b != b',')
 }
 
 /// `redirect_idp_domain` only changes what the user *sees* (it skips the Globus
@@ -276,7 +279,7 @@ mod tests {
         let unversioned = r#"{"institutions":[]}"#;
         assert_eq!(Registry::from_json(unversioned).unwrap().version(), None);
         assert_eq!(Registry::from_json(MOCK).unwrap().version(), Some("mock-0.1.0"));
-        for bad in ["", "a b", "a\"b", &"v".repeat(65)] {
+        for bad in ["", "a b", "a\"b", "a,b", &"v".repeat(65)] {
             let json = serde_json::json!({ "version": bad, "institutions": [] }).to_string();
             assert!(Registry::from_json(&json).is_err(), "{bad:?}");
         }
@@ -287,9 +290,17 @@ mod tests {
         for good in ["uchicago.edu", "a.b-c.edu", "x1.y2"] {
             assert!(with("redirect_idp_domain", good.into()).is_ok(), "{good:?}");
         }
-        for bad in ["..", "-", ".edu", "edu", "UChicago.edu", "a..edu", "-a.edu", "a-.edu", "a_b.edu"] {
+        for bad in ["..", "-", ".edu", "edu", "UChicago.edu", "a..edu", "-a.edu", "a-.edu", "a_b.edu", "10.0.0.1", "123.456"] {
             assert!(with("redirect_idp_domain", bad.into()).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn names_are_not_blank() {
+        for bad in ["", "   ", "\t"] {
+            assert!(with("name", bad.into()).is_err(), "{bad:?}");
+        }
+        assert!(with("name", " A ".into()).is_ok());
     }
 
     #[test]
@@ -307,7 +318,7 @@ mod tests {
     #[test]
     fn sign_out_urls_must_be_https() {
         assert!(with("idp_logout_url", "https://idp.a.edu/logout".into()).is_ok());
-        for bad in ["http://idp.a.edu/logout", "https://", "idp.a.edu/logout"] {
+        for bad in ["http://idp.a.edu/logout", "https://", "idp.a.edu/logout", "https://idp.a.edu/log out"] {
             assert!(with("idp_logout_url", bad.into()).is_err(), "{bad:?}");
         }
         let reg = Registry::from_json(MOCK).unwrap();

@@ -19,7 +19,7 @@ SCHEMA = "https://schema.org/"
 TMS = "https://tacc.utexas.edu/ns/tms#"
 
 spec = yaml.safe_load((ROOT / "api/openapi.yaml").read_text())
-context = json.loads((ROOT / "api/institutions.context.jsonld").read_text())
+context = json.loads((ROOT / "api/institutions.context.v1.jsonld").read_text())
 examples = spec["paths"]["/login/institutions"]["get"]["responses"]["200"]["content"]["application/json"]["examples"]
 
 failures = []

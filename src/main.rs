@@ -10,7 +10,7 @@
 //!   GET /demo                   demo page
 //!   GET /login/institutions     the approved institutions (from the mocked registry), with a Link
 //!                               header naming the JSON-LD context (see institutions_api.rs)
-//!   GET /api/institutions.context.jsonld  that JSON-LD context
+//!   GET /api/institutions.context.v1.jsonld  that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks
@@ -89,6 +89,11 @@ async fn main() {
     }
 
     let base_url = env.or("BASE_URL", "http://localhost:8080");
+    // Paths are appended to it (e.g. the institutions list's Link header).
+    if base_url.ends_with('/') {
+        eprintln!("BASE_URL must not end with '/': {base_url}");
+        std::process::exit(1);
+    }
     let bind = env.or("BIND_ADDR", "127.0.0.1:8080");
     let inst_file = env.or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
 
