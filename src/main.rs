@@ -44,7 +44,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
 use institutions::{identity_matches, is_valid_id, Institution, Provider, Registry};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use settings::Settings;
@@ -78,6 +78,10 @@ struct Session {
     rejected: bool,
     /// None in mock mode.
     token: Option<String>,
+    /// The decoded JWT payload (Globus id_token, Tapis access token) for the
+    /// landing page. Only these claims are sent to the browser, never the
+    /// token. None in mock mode.
+    claims: Option<Value>,
 }
 
 #[tokio::main]
@@ -375,15 +379,15 @@ async fn callback(
     };
 
     let user = if app.globus.is_mock() {
-        globus::mock_user_from_code(&code).map(|u| (u, None))
+        globus::mock_user_from_code(&code).map(|u| (u, None, None))
     } else {
         match inst.provider {
             Provider::Globus => globus::fetch_user(&app.globus, &code).await,
             Provider::TaccTapis => tapis::fetch_user(&app.tapis, &code).await,
         }
-        .map(|(u, t)| (u, Some(t)))
+        .map(|(u, t, c)| (u, Some(t), c))
     };
-    let (user, token) = match user {
+    let (user, token, claims) = match user {
         Ok(u) => u,
         Err(e) => return (jar_cleared, page_error(StatusCode::BAD_GATEWAY, &e)).into_response(),
     };
@@ -416,6 +420,7 @@ async fn callback(
             user: user.clone(),
             rejected: verdict != Verdict::Welcome,
             token,
+            claims,
         },
     );
     let jar = jar_cleared.add(
@@ -454,7 +459,7 @@ async fn tapis_callback_relay(State(app): State<AppState>, RawQuery(query): RawQ
 async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
     let session = jar
         .get(SESSION_COOKIE)
-        .and_then(|c| app.sessions.lock().unwrap().get(c.value()).map(|s| (s.institution.clone(), s.provider, (!s.rejected).then(|| s.user.clone()))));
+        .and_then(|c| app.sessions.lock().unwrap().get(c.value()).map(|s| (s.institution.clone(), s.provider, (!s.rejected).then(|| (s.user.clone(), s.claims.clone())))));
     // The provider's own sign-out page, which the page opens in a new tab. The
     // mock has no real Globus or Tapis session to sign out of.
     let logout_url = match &session {
@@ -465,10 +470,11 @@ async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
     };
     // A rejected login still reports its institution and logout_url, so the
     // demo page can offer "Log out" to revoke its token.
-    let (institution, provider, user) = match session {
-        Some((i, p, u)) => (Some(i), Some(p), u),
+    let (institution, provider, login) = match session {
+        Some((i, p, l)) => (Some(i), Some(p), l),
         None => (None, None, None),
     };
+    let (user, claims) = login.unzip();
     tapis_style(
         StatusCode::OK,
         "Login status.",
@@ -478,6 +484,7 @@ async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
             "institution": institution,
             "provider": provider,
             "user": user,
+            "claims": claims.flatten(),
             "logout_url": logout_url,
         }),
     )

@@ -52,6 +52,19 @@ pub fn build_authorize_url(cfg: &GlobusConfig, state: &str, redirect_idp_domain:
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
+    /// Present because SCOPES includes `openid`.
+    id_token: Option<String>,
+}
+
+/// The decoded payload of a JWT, without verifying its signature. Only for
+/// tokens received directly from a token endpoint over TLS; the landing page
+/// shows these claims so the token itself never reaches the browser.
+pub fn jwt_claims(token: &str) -> Result<serde_json::Value, String> {
+    let payload = token.split('.').nth(1).ok_or("token is not a JWT")?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .map_err(|e| format!("bad JWT payload: {e}"))?;
+    serde_json::from_slice(&raw).map_err(|e| format!("bad JWT payload: {e}"))
 }
 
 /// Subset of the Globus OIDC userinfo response we care about.
@@ -66,8 +79,12 @@ pub struct UserInfo {
 }
 
 /// Exchange the authorization code and fetch userinfo (real Globus). Also
-/// returns the access token so logout can revoke it.
-pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<(UserInfo, String), String> {
+/// returns the access token so logout can revoke it, and the id_token's
+/// claims (Globus access tokens are opaque; the id_token is the JWT).
+pub async fn fetch_user(
+    cfg: &GlobusConfig,
+    code: &str,
+) -> Result<(UserInfo, String, Option<serde_json::Value>), String> {
     let (client_id, client_secret) = cfg.client.as_ref().ok_or("not configured for Globus")?;
     let http = reqwest::Client::new();
 
@@ -104,7 +121,8 @@ pub async fn fetch_user(cfg: &GlobusConfig, code: &str) -> Result<(UserInfo, Str
         .json()
         .await
         .map_err(|e| format!("bad userinfo response: {e}"))?;
-    Ok((user, token.access_token))
+    let claims = token.id_token.as_deref().map(jwt_claims).transpose()?;
+    Ok((user, token.access_token, claims))
 }
 
 /// Revoke an access token so it stops working before it expires.
@@ -195,6 +213,13 @@ mod tests {
         assert_eq!(url.as_str().split('?').next(), Some(GLOBUS_LOGOUT_URL));
         assert_eq!(q["client_id"], "abc");
         assert_eq!(q["redirect_uri"], "http://localhost:8080/");
+    }
+
+    #[test]
+    fn jwt_claims_decodes_the_payload() {
+        let token = format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(r#"{"sub":"abc","iss":"x"}"#));
+        assert_eq!(jwt_claims(&token).unwrap()["sub"], "abc");
+        assert!(jwt_claims("opaque-token").is_err());
     }
 
     #[test]

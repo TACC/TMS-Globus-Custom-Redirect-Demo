@@ -3,8 +3,7 @@
 //! tms_portal's `get_token_for_provider`: a form post to `/v3/oauth2/tokens`
 //! with HTTP Basic client credentials.
 
-use crate::globus::UserInfo;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use crate::globus::{jwt_claims, UserInfo};
 use url::Url;
 
 pub const TAPIS_BASE_URL: &str = "https://tacc.tapis.io";
@@ -39,8 +38,12 @@ pub fn build_authorize_url(cfg: &TapisConfig, state: &str) -> Option<Url> {
 }
 
 /// Exchange the authorization code for a Tapis access token and read the
-/// identity from its claims. Also returns the token so logout can revoke it.
-pub async fn fetch_user(cfg: &TapisConfig, code: &str) -> Result<(UserInfo, String), String> {
+/// identity from its claims. Also returns the token so logout can revoke it,
+/// and its claims for the landing page.
+pub async fn fetch_user(
+    cfg: &TapisConfig,
+    code: &str,
+) -> Result<(UserInfo, String, Option<serde_json::Value>), String> {
     let (client_id, client_secret) = cfg.client.as_ref().ok_or("TaccTapis login is not configured")?;
     let resp = reqwest::Client::new()
         .post(cfg.oauth2("tokens"))
@@ -66,18 +69,14 @@ pub async fn fetch_user(cfg: &TapisConfig, code: &str) -> Result<(UserInfo, Stri
         .as_str()
         .ok_or("Tapis token response has no result.access_token.access_token")?
         .to_string();
-    Ok((user_from_token(&token)?, token))
+    let claims = jwt_claims(&token).map_err(|e| format!("Tapis access token: {e}"))?;
+    Ok((user_from_claims(&claims)?, token, Some(claims)))
 }
 
 /// Tapis access tokens are JWTs carrying the identity (`sub` = "user@tenant").
 /// The token came straight from the Tapis token endpoint over TLS with client
 /// authentication, so its claims are read without re-verifying the signature.
-fn user_from_token(token: &str) -> Result<UserInfo, String> {
-    let payload = token.split('.').nth(1).ok_or("Tapis access token is not a JWT")?;
-    let raw = URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .map_err(|e| format!("bad Tapis token payload: {e}"))?;
-    let claims: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+fn user_from_claims(claims: &serde_json::Value) -> Result<UserInfo, String> {
     let claim = |k: &str| claims[k].as_str().map(str::to_string);
     let tenant = claim("tapis/tenant_id");
     let username = claim("tapis/username");
@@ -143,9 +142,8 @@ mod tests {
 
     #[test]
     fn identity_comes_from_token_claims() {
-        let claims = r#"{"sub":"jdoe@tacc","tapis/username":"jdoe","tapis/tenant_id":"tacc"}"#;
-        let token = format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(claims));
-        let u = user_from_token(&token).unwrap();
+        let claims = serde_json::json!({"sub":"jdoe@tacc","tapis/username":"jdoe","tapis/tenant_id":"tacc"});
+        let u = user_from_claims(&claims).unwrap();
         assert_eq!(u.preferred_username, "jdoe@tacc");
         assert_eq!(u.organization.as_deref(), Some("tacc"));
     }

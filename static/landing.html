@@ -12,6 +12,9 @@
     <style>
         .auth-form { margin: 0; }
         [hidden] { display: none !important; }
+        .claims-section { max-width: 580px; margin: 12px auto 0; }
+        .claims-section summary { cursor: pointer; color: var(--muted); line-height: 1.6; }
+        .claims { margin: 8px 0 0; overflow-x: auto; padding: 0.75rem; background: #f4f5f7; border: 2px solid #ddd; border-radius: 4px; font-size: 0.85rem; text-align: left; white-space: pre; }
     </style>
 </head>
 
@@ -41,6 +44,11 @@
         <div id="authenticated" hidden>
             <p>Logged in as: <span id="user"></span></p>
             <p>Institution: <b id="institution"></b></p>
+            <!-- Decoded on the server; the token itself is never sent to the browser. -->
+            <details class="claims-section" id="claims-section" hidden>
+                <summary>Token claims (<span id="claims-source"></span>)</summary>
+                <pre class="claims" id="claims"></pre>
+            </details>
             <!-- Hidden for now; remove this comment wrapper to bring the TMS link back.
             <p class="tms-link">
                 <a class="tms-btn"
@@ -69,6 +77,12 @@
                 const details = [u.identity_provider_display_name, u.preferred_username].filter(Boolean).join(', ');
                 document.getElementById('user').textContent = `${u.name ?? u.preferred_username} (${details})`;
                 document.getElementById('institution').textContent = result.institution;
+                if (result.claims) {
+                    document.getElementById('claims-source').textContent =
+                        result.provider === 'tacc_tapis' ? 'Tapis access token' : 'Globus id_token';
+                    document.getElementById('claims').textContent = JSON.stringify(result.claims, null, 2);
+                    document.getElementById('claims-section').hidden = false;
+                }
                 document.getElementById('authenticated').hidden = false;
                 document.getElementById('anonymous').hidden = true;
                 const form = document.getElementById('logout-form');
