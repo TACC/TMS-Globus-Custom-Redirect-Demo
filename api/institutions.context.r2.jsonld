@@ -1,0 +1,25 @@
+{
+  "@context": {
+    "schema": "https://schema.org/",
+    "tms": "https://tacc.utexas.edu/ns/tms#",
+
+    "type": "@type",
+    "ItemList": "schema:ItemList",
+    "Organization": "schema:Organization",
+
+    "status": null,
+    "message": null,
+    "version": null,
+    "result": "schema:itemListElement",
+
+    "id": "schema:identifier",
+    "name": "schema:name",
+    "provider": { "@id": "tms:provider", "@type": "@vocab" },
+    "redirect_idp_domain": "tms:redirectIdpDomain",
+    "idp_logout_url": { "@id": "tms:idpLogoutUrl", "@type": "@id" },
+    "approved": "tms:approved",
+
+    "globus": "tms:GlobusProvider",
+    "tacc_tapis": "tms:TaccTapisProvider"
+  }
+}

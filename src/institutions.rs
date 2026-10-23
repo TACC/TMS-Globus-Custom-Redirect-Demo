@@ -2,12 +2,14 @@
 //!
 //! In production this list would come from TMS (e.g. a table next to
 //! `identity_providers` / `allowed_redirects`) or an admin API. Here it is
-//! loaded from a mocked registry file, `{ "version", "institutions": [...] }`,
+//! read from a mocked registry file, `{ "version", "institutions": [...] }`,
 //! holding approved and unapproved entries alike. `institutions_api` serves the
 //! approved ones in the shape api/openapi.yaml defines.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt;
+use std::sync::Arc;
 
 /// Which login flow an entry uses, named after tms_portal's provider types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,8 +21,8 @@ pub enum Provider {
     TaccTapis,
 }
 
-/// JSON-LD type of an entry (`type`, aliased to `@type` in
-/// api/institutions.context.r1.jsonld). Written out, never read from the registry.
+/// JSON-LD type of an entry (`type`, aliased to `@type` by the JSON-LD
+/// context, api/institutions.context.r<n>.jsonld). Written out, never read from the registry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum InstitutionType {
     #[default]
@@ -81,9 +83,9 @@ impl Registry {
         Ok(reg)
     }
 
-    pub fn load(path: &str) -> Result<Self, String> {
-        let raw = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-        Self::from_json(&raw).map_err(|e| format!("parsing {path}: {e}"))
+    pub fn load(path: &str) -> Result<Self, RegistryError> {
+        let raw = std::fs::read_to_string(path).map_err(|e| RegistryError::Unavailable(format!("reading {path}: {e}")))?;
+        Self::from_json(&raw).map_err(|e| RegistryError::Invalid(format!("parsing {path}: {e}")))
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -135,6 +137,45 @@ impl Registry {
     /// hand-edited `?institution=` query string can't steer the redirect.
     pub fn find(&self, id: &str) -> Option<&Institution> {
         self.institutions.iter().find(|i| i.id == id)
+    }
+}
+
+/// Why a request could not get the registry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegistryError {
+    /// It could not be read (e.g. the file is missing); a retry may succeed.
+    Unavailable(String),
+    /// It was read but breaks the spec's rules, so none of it is served.
+    Invalid(String),
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegistryError::Unavailable(e) | RegistryError::Invalid(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Where each request gets the registry from.
+#[derive(Debug, Clone)]
+pub enum RegistrySource {
+    /// One registry, held in memory (the tests' source).
+    #[cfg(test)]
+    Fixed(Arc<Registry>),
+    /// A registry file, read again for every request, so edits take effect
+    /// without a restart and a broken file is reported rather than served.
+    File(String),
+}
+
+impl RegistrySource {
+    pub fn current(&self) -> Result<Arc<Registry>, RegistryError> {
+        match self {
+            #[cfg(test)]
+            RegistrySource::Fixed(reg) => Ok(reg.clone()),
+            // The file is small; a blocking read keeps this simple.
+            RegistrySource::File(path) => Registry::load(path).map(Arc::new),
+        }
     }
 }
 
@@ -324,5 +365,21 @@ mod tests {
         let reg = Registry::from_json(MOCK).unwrap();
         assert!(reg.find("utexas").unwrap().idp_logout_url.is_some());
         assert!(reg.find("globus").unwrap().idp_logout_url.is_none());
+    }
+
+    /// A registry file is read per request: edits show at once, a missing
+    /// file is unavailable and an invalid one is refused.
+    #[test]
+    fn file_source_reads_the_file_each_time() {
+        let path = std::env::temp_dir().join(format!("registry-{}.json", uuid::Uuid::new_v4()));
+        let source = RegistrySource::File(path.to_str().unwrap().into());
+        assert!(matches!(source.current(), Err(RegistryError::Unavailable(_))));
+        std::fs::write(&path, MOCK).unwrap();
+        assert_eq!(source.current().unwrap().version(), Some("mock-0.1.0"));
+        std::fs::write(&path, MOCK.replace("mock-0.1.0", "mock-0.1.1")).unwrap();
+        assert_eq!(source.current().unwrap().version(), Some("mock-0.1.1"));
+        std::fs::write(&path, "{").unwrap();
+        assert!(matches!(source.current(), Err(RegistryError::Invalid(_))));
+        std::fs::remove_file(&path).unwrap();
     }
 }

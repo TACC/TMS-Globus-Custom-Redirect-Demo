@@ -11,7 +11,7 @@
 //!   GET /api/v1/institutions    the approved institutions (from the mocked registry), with a Link
 //!                               header naming the JSON-LD context (see institutions_api.rs)
 //!   OPTIONS /api/v1/institutions  CORS preflight for that list (see CORS_ALLOWED_ORIGINS)
-//!   GET /api/v1/institutions.context.r1.jsonld  that JSON-LD context
+//!   GET /api/v1/institutions.context.r<n>.jsonld  each revision of that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks
@@ -42,7 +42,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use globus::GlobusConfig;
-use institutions::{identity_matches, is_valid_id, Institution, Provider, Registry};
+use institutions::{identity_matches, is_valid_id, Institution, Provider, Registry, RegistryError, RegistrySource};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -59,7 +59,7 @@ const SESSION_COOKIE: &str = "idp_demo_session";
 struct AppState {
     globus: Arc<GlobusConfig>,
     tapis: Arc<TapisConfig>,
-    registry: Arc<Registry>,
+    registry: RegistrySource,
     idp: Arc<TestIdp>,
     base_url: String,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
@@ -143,6 +143,8 @@ async fn main() {
     let tapis_relay = (tapis.callback_url != globus.callback_url)
         .then(|| url::Url::parse(&tapis.callback_url).expect("TAPIS_CALLBACK_URL must be a valid URL"));
 
+    // Checked once here so a bad file stops the server at startup; requests
+    // then read the file again, so later edits take effect without a restart.
     let registry = Registry::load(&inst_file).unwrap_or_else(|e| panic!("{e}"));
     println!(
         "Loaded {} approved institution(s) from {inst_file}",
@@ -165,7 +167,7 @@ async fn main() {
         idp.issuer, idp.domain, idp.client_id
     );
 
-    let registry = Arc::new(registry);
+    let registry = RegistrySource::File(inst_file);
     let state = AppState {
         globus: Arc::new(globus),
         tapis: Arc::new(tapis),
@@ -239,6 +241,15 @@ fn build_test_idp(env: &Settings, base_url: &str) -> TestIdp {
     )
 }
 
+/// 503 for a registry that could not be read (worth a retry), 500 for one
+/// that is invalid.
+fn registry_status(e: &RegistryError) -> StatusCode {
+    match e {
+        RegistryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        RegistryError::Invalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 fn tapis_style(status: StatusCode, message: &str, result: serde_json::Value) -> Response {
     let s = if status.is_success() { "success" } else { "error" };
     (status, Json(json!({ "status": s, "message": message, "result": result }))).into_response()
@@ -277,7 +288,11 @@ async fn login(
             json!(null),
         );
     }
-    let Some(inst) = app.registry.find(&p.institution) else {
+    let registry = match app.registry.current() {
+        Ok(registry) => registry,
+        Err(e) => return tapis_style(registry_status(&e), &e.to_string(), json!(null)),
+    };
+    let Some(inst) = registry.find(&p.institution) else {
         return tapis_style(
             StatusCode::FORBIDDEN,
             &format!("Institution '{}' is not known.", p.institution),
@@ -373,7 +388,11 @@ async fn callback(
     if nonce != state {
         return (jar_cleared, page_error(StatusCode::UNAUTHORIZED, "State mismatch.")).into_response();
     }
-    let Some(inst) = app.registry.find(&inst_id).cloned() else {
+    let registry = match app.registry.current() {
+        Ok(registry) => registry,
+        Err(e) => return (jar_cleared, page_error(registry_status(&e), &e.to_string())).into_response(),
+    };
+    let Some(inst) = registry.find(&inst_id).cloned() else {
         return (jar_cleared, page_error(StatusCode::FORBIDDEN, "Institution is no longer known."))
             .into_response();
     };
@@ -495,7 +514,9 @@ async fn login_status(State(app): State<AppState>, jar: CookieJar) -> Response {
 /// too and the next login is a complete one; otherwise it returns to the
 /// landing page.
 fn globus_logout_url(app: &AppState, institution: &str) -> String {
-    let url = match app.registry.find(institution) {
+    // An unreadable registry just means the plain sign-out.
+    let registry = app.registry.current().ok();
+    let url = match registry.as_ref().and_then(|r| r.find(institution)) {
         Some(inst) if inst.idp_logout_url.is_some() => globus::logout_url(
             &app.globus,
             &format!("{}/logout/idp?institution={}", app.base_url, url_encode(&inst.id)),
@@ -523,7 +544,11 @@ async fn logout_idp(State(app): State<AppState>, query: Result<Query<LogoutIdpPa
         Ok(_) => return page_error(StatusCode::BAD_REQUEST, "Malformed institution id.").into_response(),
         Err(e) => return page_error(StatusCode::BAD_REQUEST, &e.body_text()).into_response(),
     };
-    match app.registry.find(&p.institution).and_then(|i| i.idp_logout_url.as_deref()) {
+    let registry = match app.registry.current() {
+        Ok(registry) => registry,
+        Err(e) => return page_error(registry_status(&e), &e.to_string()).into_response(),
+    };
+    match registry.find(&p.institution).and_then(|i| i.idp_logout_url.as_deref()) {
         Some(url) => Redirect::to(url).into_response(),
         None => Redirect::to("/").into_response(),
     }

@@ -13,7 +13,5 @@ rules:
   no-invalid-media-type-examples:
     severity: error
     allowAdditionalProperties: true
-  # Neither operation takes input a client could get wrong.
-  operation-4xx-response: off
   # Proprietary: there is no SPDX identifier or public license URL to give.
   info-license-strict: off

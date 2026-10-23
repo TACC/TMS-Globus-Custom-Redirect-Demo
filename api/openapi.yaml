@@ -1,56 +1,52 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API
-  version: 0.5.0
+  version: 0.6.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
-    Two read-only endpoints: the list of approved institutions a user can
-    sign in through, with the IdP each one steers to, and the JSON-LD context
-    that maps that list to schema.org. The list also answers CORS preflight
+    Read-only endpoints: the list of approved institutions a user can sign
+    in through, with the IdP each one steers to, and the JSON-LD contexts
+    that map that list to schema.org. The list also answers CORS preflight
     requests.
 
-    The list uses the Tapis-style envelope `{ type, status, message, version, result }`.
+    The list comes in an envelope, `{ type, status, message, version, result }`.
 
-    ### schema.org mapping
-    The payload stays plain, flat JSON. Each schema and field names the
-    linked-data term it means with `x-schema-org`; the JSON-LD context served at
-    `GET /api/v1/institutions.context.r1.jsonld` holds the same mapping.
-
-    - The response is a [schema:ItemList](https://schema.org/ItemList) and each
-      entry a [schema:Organization](https://schema.org/Organization). The
-      `type` fields carry those types into the graph; a context cannot add
-      them on its own.
-    - The list links each entry directly with `schema:itemListElement`. The
-      order of `result` is part of the JSON only; the graph does not record it.
-    - Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
-      login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
-    - The envelope fields `status`, `message` and `version` describe the HTTP
-      response, not the institutions, so the context leaves them out of the graph.
-
-    `x-schema-org-related` names the schema.org terms closest in meaning,
-    including ones from [pending.schema.org](https://pending.schema.org/docs/pending.home.html).
-    They need nested objects (an action, a certification) that a flat field
-    cannot express, so they document intent rather than map the field:
-
-    - **AuthenticateAction** (pending, issue 4507): signing in to the
-      institution's IdP. `provider` and `redirect_idp_domain` describe it.
-    - **Certification** / **certificationStatus** (core): `approved` amounts to
-      a Certification with status `CertificationActive` or `CertificationInactive`.
-
-    schema.org, pending included, has no term for an IdP domain or a sign-out
-    URL, so those stay in `tms:`.
+    ### Versions
+    `v1` in the paths is the API's major version, which changes only with an
+    incompatible change. `info.version` versions this document and stays
+    below 1.0.0 until the v1 contract is frozen: until then a minor version
+    may still change it incompatibly. From 1.0.0 on, minor versions only add
+    to it.
 
     ### Compatibility
-    Later minor versions may add fields to any object. Clients must ignore
+    Later versions may add fields to any object. Clients must ignore
     fields they do not recognise.
+
+    ### Linked data
+    The payload stays plain JSON. Each schema and field names the
+    linked-data term it means with `x-schema-org`, and the JSON-LD context
+    holds the same mapping. `schema-org.md`, next to this document, explains
+    the choice of terms.
+
+    ### Errors
+    Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
+    details (`application/problem+json`, the `Problem` schema), sent with
+    `Cache-Control: no-store`. Besides the errors each operation lists:
+
+    - A method a path does not support gets `405 Method Not Allowed`, with
+      an `Allow` header naming the methods it does support:
+      `GET, HEAD, OPTIONS` for `/api/v1/institutions`, `GET, HEAD` for a
+      context.
+    - Any other path under `/api/v1` gets `404 Not Found`.
+
+    On `/api/v1/institutions` these errors carry the list's CORS headers,
+    like every response there. Everywhere else they carry
+    `Access-Control-Allow-Origin: *`, like the contexts.
   contact:
     name: TACC
     url: https://tacc.utexas.edu
   license:
     name: Proprietary
-externalDocs:
-  description: schema.org pending terms
-  url: https://pending.schema.org/docs/pending.home.html
 
 servers:
   - url: "{base_url}"
@@ -79,14 +75,26 @@ paths:
         so unapproved entries (for example, ones pending review) never appear
         in it.
 
-        Clients revalidate on every use (`Cache-Control: no-cache`); when the
-        data has a `version`, it doubles as the `ETag`, and a matching
-        `If-None-Match` gets `304 Not Modified`.
+        **Caching.** Clients revalidate on every use (`Cache-Control: no-cache`).
+        When the data has a `version`, the response's `ETag` is the weak tag
+        `W/"<version>"`. It is weak because `version` names a revision of the
+        data, not the exact bytes: the same data may be sent with other bytes
+        (field order, white space, a reworded `message`).
 
-        Cross-origin reads are set per deployment by a list of allowed
-        origins (`scheme://host[:port]`), which is either empty, specific
-        origins, or `*` for any origin. Every response, including `304` and
-        errors, follows it:
+        **Conditional requests.** `If-None-Match` matches when it is `*`, or
+        when one of its comma-separated entity tags equals the current `ETag`
+        by weak comparison: the `W/` prefix is ignored on both sides and the
+        quoted parts are compared byte for byte. `*` matches whenever the list
+        can be served, whether or not the data has a `version`. A tag that
+        cannot be parsed matches nothing. A match gets `304 Not Modified` with
+        no body and the headers a `200` would carry, except `Link`. When the
+        registry cannot be read, the error is sent whatever `If-None-Match`
+        holds.
+
+        **CORS.** Cross-origin reads are set per deployment by a list of
+        allowed origins (`scheme://host[:port]`), which is either empty,
+        specific origins, or `*` for any origin. Every response, including
+        `304` and errors, follows it:
 
         - **Empty** (only clients on the same origin): no CORS headers.
         - **Specific origins**: always `Vary: Origin`. When the request's
@@ -105,10 +113,11 @@ paths:
         - name: If-None-Match
           in: header
           required: false
-          description: An `ETag` from an earlier response.
+          description: Entity tags from earlier responses, or `*`.
           schema:
             type: string
-          example: '"2026-10-23.1"'
+          example: W/"2026-10-23.1"
+        - $ref: "#/components/parameters/Origin"
       responses:
         "200":
           description: The approved institutions.
@@ -125,13 +134,12 @@ paths:
               $ref: "#/components/headers/VaryOrigin"
             Link:
               description: |
-                Points JSON-LD processors at the context served by
-                `GET /api/v1/institutions.context.r1.jsonld`, as an absolute URL:
-                `<{base_url}/api/v1/institutions.context.r1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+                Points JSON-LD processors at the latest context, as an absolute URL:
+                `<{base_url}/api/v1/institutions.context.r2.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
               required: true
               schema:
                 type: string
-              example: <https://tms.example.org/api/v1/institutions.context.r1.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+              example: <https://tms.example.org/api/v1/institutions.context.r2.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
           content:
             application/json:
               schema:
@@ -167,7 +175,8 @@ paths:
                         idp_logout_url: null
                         approved: true
         "304":
-          description: The list has not changed since the `ETag` in `If-None-Match`.
+          description: |
+            `If-None-Match` matched (see above). No body, and no `Link`.
           headers:
             Cache-Control:
               $ref: "#/components/headers/ListCacheControl"
@@ -180,18 +189,9 @@ paths:
             Vary:
               $ref: "#/components/headers/VaryOrigin"
         "500":
-          description: The registry could not be read.
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
+          $ref: "#/components/responses/RegistryInvalid"
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
     options:
       tags: [institutions]
       operationId: preflightInstitutions
@@ -212,13 +212,7 @@ paths:
         `Access-Control-Request-Method` or `Access-Control-Request-Headers`:
         the browser compares them against what the response allows.
       parameters:
-        - name: Origin
-          in: header
-          required: false
-          description: Origin of the page making the cross-origin request.
-          schema:
-            type: string
-          example: https://portal.example.org
+        - $ref: "#/components/parameters/Origin"
         - name: Access-Control-Request-Method
           in: header
           required: false
@@ -261,31 +255,43 @@ paths:
             Vary:
               $ref: "#/components/headers/VaryOrigin"
 
-  /api/v1/institutions.context.r1.jsonld:
+  /api/v1/institutions.context.r{revision}.jsonld:
     get:
       tags: [institutions]
       operationId: getInstitutionsContext
-      summary: The JSON-LD context for the institutions list
+      summary: A revision of the JSON-LD context for the institutions list
       description: |
         Maps the list's plain JSON fields to schema.org and `tms:` terms.
         Public and open to any origin (`Access-Control-Allow-Origin: *`), so
         JSON-LD processors on other sites can fetch it.
 
-        Contexts are revised separately from the API. `r<n>` in the path
-        names revision `n`, one fixed document: a changed context (for
-        example, mapping a field a later minor version adds) is published as
-        the next revision, `/api/v1/institutions.context.r<n+1>.jsonld`, and
-        the list's `Link` header moves to it. Earlier revisions stay served
-        unchanged for clients that cached a `Link` to them. A URL never
-        changes content, so it may be cached indefinitely.
+        Contexts are revised separately from the API. Each revision is one
+        fixed document: a changed context (for example, mapping a field a
+        later version adds) is published as the next revision, and the
+        list's `Link` header moves to it. Earlier revisions stay served
+        unchanged for clients that cached a `Link` to them. A revision's URL
+        never changes content, so it may be cached indefinitely.
+
+        The files `institutions.context.r<n>.jsonld` next to this document
+        are the authoritative content of each revision; the example below
+        is the latest one.
+      parameters:
+        - name: revision
+          in: path
+          required: true
+          description: |
+            A published revision, in decimal without leading zeros. Any
+            other value gets `404`.
+          schema:
+            type: integer
+            enum: [1, 2]
+          example: 2
       responses:
         "200":
           description: The JSON-LD context document.
           headers:
             Access-Control-Allow-Origin:
-              required: true
-              schema:
-                const: "*"
+              $ref: "#/components/headers/AnyOrigin"
             Cache-Control:
               required: true
               schema:
@@ -298,22 +304,82 @@ paths:
                 properties:
                   "@context":
                     type: object
+              examples:
+                latest:
+                  summary: Revision 2
+                  value:
+                    "@context":
+                      schema: https://schema.org/
+                      tms: https://tacc.utexas.edu/ns/tms#
+                      type: "@type"
+                      ItemList: schema:ItemList
+                      Organization: schema:Organization
+                      status: null
+                      message: null
+                      version: null
+                      result: schema:itemListElement
+                      id: schema:identifier
+                      name: schema:name
+                      provider:
+                        "@id": tms:provider
+                        "@type": "@vocab"
+                      redirect_idp_domain: tms:redirectIdpDomain
+                      idp_logout_url:
+                        "@id": tms:idpLogoutUrl
+                        "@type": "@id"
+                      approved: tms:approved
+                      globus: tms:GlobusProvider
+                      tacc_tapis: tms:TaccTapisProvider
+        "404":
+          description: No such revision has been published.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AnyOrigin"
+            Cache-Control:
+              $ref: "#/components/headers/ErrorCacheControl"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                unknown:
+                  summary: An unpublished revision
+                  value:
+                    type: about:blank
+                    title: Not Found
+                    status: 404
+                    detail: No such resource.
 
 components:
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: false
+      description: Origin of the page making a cross-origin request.
+      schema:
+        type: string
+      example: https://portal.example.org
+
   headers:
     ListCacheControl:
       description: Clients must revalidate before reusing a stored copy.
       required: true
       schema:
         const: no-cache
+    ErrorCacheControl:
+      description: Errors are never stored.
+      required: true
+      schema:
+        const: no-store
     ETag:
       description: |
-        The response's `version` in double quotes. Present exactly when
-        `version` is.
+        The weak tag `W/"<version>"`. Present exactly when the data has a
+        `version`.
       schema:
         type: string
-        pattern: '^"[-!#-+.-~]{1,64}"$'
-      example: '"2026-10-23.1"'
+        pattern: '^W/"[-!#-+.-~]{1,64}"$'
+      example: W/"2026-10-23.1"
     CorsAllowOrigin:
       description: |
         The request's `Origin` when the deployment allows it, or `*` when it
@@ -333,13 +399,74 @@ components:
         headers then depend on the request's `Origin`.
       schema:
         const: Origin
+    AnyOrigin:
+      description: Any origin may read the response.
+      required: true
+      schema:
+        const: "*"
+
+  responses:
+    RegistryInvalid:
+      description: |
+        The registry was read but is invalid, so none of it is served.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/ErrorCacheControl"
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/CorsAllowOrigin"
+        Access-Control-Expose-Headers:
+          $ref: "#/components/headers/CorsExposeHeaders"
+        Vary:
+          $ref: "#/components/headers/VaryOrigin"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalid:
+              summary: An invalid registry
+              value:
+                type: about:blank
+                title: Internal Server Error
+                status: 500
+                detail: The institution registry is invalid.
+    RegistryUnavailable:
+      description: |
+        The registry could not be read for now; the client may retry later.
+        `Retry-After`, when sent, says how long to wait.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 0
+        Cache-Control:
+          $ref: "#/components/headers/ErrorCacheControl"
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/CorsAllowOrigin"
+        Access-Control-Expose-Headers:
+          $ref: "#/components/headers/CorsExposeHeaders"
+        Vary:
+          $ref: "#/components/headers/VaryOrigin"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            unavailable:
+              summary: An unreachable registry
+              value:
+                type: about:blank
+                title: Service Unavailable
+                status: 503
+                detail: The institution registry cannot be read right now.
 
   schemas:
     InstitutionsResponse:
       type: object
       description: |
-        Tapis-style envelope around the institution list. Clients must ignore
-        fields they do not recognise.
+        Envelope around the institution list. Clients must ignore fields
+        they do not recognise.
       x-schema-org:
         "@type": schema:ItemList
       required: [type, status, message, result]
@@ -357,9 +484,9 @@ components:
           type: string
           description: |
             Revision of the institution data (not of this API), so a client can
-            tell when the list has changed. Opaque; it is also the response's
-            `ETag`, so it is limited to visible ASCII other than `"` (not
-            allowed in an `ETag`) and `,` (which separates tags in
+            tell when the list has changed. Opaque; it is also the inside of
+            the response's `ETag`, so it is limited to visible ASCII other than
+            `"` (not allowed in an `ETag`) and `,` (which separates tags in
             `If-None-Match`). Optional; readers must not require it.
           minLength: 1
           maxLength: 64
@@ -375,17 +502,6 @@ components:
             $ref: "#/components/schemas/Institution"
           x-schema-org: schema:itemListElement
 
-    ErrorResponse:
-      type: object
-      required: [status, message, result]
-      properties:
-        status:
-          const: error
-        message:
-          type: string
-        result:
-          type: "null"
-
     Institution:
       type: object
       x-schema-org:
@@ -395,7 +511,7 @@ components:
         every field, writing `null` where a field does not apply. Clients must
         ignore fields they do not recognise.
       required: [type, id, name, provider, redirect_idp_domain, idp_logout_url, approved]
-      # Tapis logins do not go through Globus, so there is no IdP to steer to.
+      # A tacc_tapis entry never has an IdP domain.
       if:
         properties:
           provider:
@@ -413,7 +529,7 @@ components:
           type: string
           maxLength: 64
           pattern: "^[a-z0-9_]+$"
-          description: Stable id the UI uses to pick the institution at login.
+          description: Stable identifier of the entry, unique within the list.
           examples: [uchicago]
           x-schema-org: schema:identifier
         name:
@@ -436,14 +552,11 @@ components:
           # starts with a letter, which rules out IP addresses.
           pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
           description: |
-            Domain Globus associates with the institution's IdP, in lower case,
-            passed verbatim as `redirect_idp_domain` on the authorize request.
-            Login also requires the returned username to end in `@<domain>`.
-            `null` means a plain login that accepts any identity, and is
-            required when `provider` is `tacc_tapis`.
+            Domain Globus associates with the institution's IdP, in lower case.
+            `null` when the entry has no IdP to steer to, and always `null`
+            when `provider` is `tacc_tapis`.
           examples: [uchicago.edu]
           x-schema-org: tms:redirectIdpDomain
-          x-schema-org-related: [schema:AuthenticateAction]
         idp_logout_url:
           type: [string, "null"]
           format: uri
@@ -451,10 +564,8 @@ components:
           # https, a non-empty host, and no white space anywhere.
           pattern: '^https://[^/?#\s]+([/?#]\S*)?$'
           description: |
-            Sign-out URL of the institution's own IdP. Globus does not pass
-            `prompt=login` on to the IdP, so ending the IdP's session is the
-            only way to make the next login ask for a password again.
-            Clients redirect the browser here at sign-out, so it must be `https`.
+            Sign-out URL of the institution's own IdP, always `https`, or
+            `null` when there is none.
           examples: [https://uchicago.okta.com/login/signout]
           x-schema-org: tms:idpLogoutUrl
         approved:
@@ -463,14 +574,43 @@ components:
             Whether login may proceed for this institution. Always `true`,
             since the listing leaves unapproved entries out.
           x-schema-org: tms:approved
-          x-schema-org-related: [schema:Certification, schema:certificationStatus]
 
     Provider:
       type: string
       enum: [globus, tacc_tapis]
       description: |
-        Login flow for the entry, named after tms_portal's provider types.
+        Login flow for the entry.
         `globus`: Globus Auth, optionally steered by `redirect_idp_domain`.
-        `tacc_tapis`: Tapis OAuth2 directly, not through Globus.
+        `tacc_tapis`: Tapis OAuth2, without Globus.
       x-schema-org: tms:provider
-      x-schema-org-related: [schema:AuthenticateAction, schema:provider]
+
+    Problem:
+      type: object
+      description: |
+        [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details.
+        `type` is `about:blank`, so `title` is the HTTP status phrase and
+        `detail` says what went wrong. Clients must ignore members they do
+        not recognise.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Problem type; `about:blank` until a version defines others.
+          examples: [about:blank]
+        title:
+          type: string
+          minLength: 1
+          description: Short summary of the problem type.
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: The response's HTTP status code.
+        detail:
+          type: string
+          description: Human-readable explanation of this occurrence.
+        instance:
+          type: string
+          format: uri-reference
+          description: Identifies this occurrence.

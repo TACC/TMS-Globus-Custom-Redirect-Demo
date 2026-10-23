@@ -8,15 +8,19 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to commit SHAs (tag in the comment); update both together.
 jobs:
   # Unit tests plus the API contract tests (src/institutions_api.rs), which
   # check the endpoints' responses against api/openapi.yaml.
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Pinned by SHA, so the toolchain is named here rather than by the ref.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
 
   # The spec itself: valid OpenAPI, examples that match their schemas, and an
@@ -24,13 +28,29 @@ jobs:
   api-spec:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: npx --yes @redocly/cli@2.60.0 lint
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install pyld==3.3.0 pyyaml==6.0.3
+      - run: pip install -r conformance/requirements.txt
       - run: python scripts/check_jsonld.py
+
+  # The black-box conformance suite (conformance/) and the JSON-LD check
+  # over HTTP, against the running demo under each kind of CORS setting.
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r conformance/requirements.txt
+      - run: conformance/run_against_demo.sh

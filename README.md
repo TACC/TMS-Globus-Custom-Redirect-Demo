@@ -21,7 +21,10 @@ addition being `redirect_idp_domain`.
    specified in `api/openapi.yaml`. The registry is checked against the
    spec's rules when it loads (unique ids, lower-case domains, `https`
    sign-out URLs, no domain for Tapis), so a bad entry stops the server
-   instead of being served. The list is public, so
+   instead of being served. Each request reads the file again, so edits
+   take effect without a restart; if it has gone missing the list answers
+   503, and if it no longer passes the checks, 500 (RFC 9457 problem
+   details, as the spec gives them). The list is public, so
    `approved: false` entries are left out of it. They stay in the registry:
    `/login?institution=<id>` for one of them does not start a login but
    answers with a **Filtered** page (laid out like **Welcome**, with the
@@ -305,29 +308,53 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 
 ```bash
 cargo test
-npx @redocly/cli@2.60.0 lint                              # the spec, configured by redocly.yaml
-pip install pyld==3.3.0 pyyaml==6.0.3 && python scripts/check_jsonld.py
+npx @redocly/cli@2.60.0 lint                  # the spec, configured by redocly.yaml
+pip install -r conformance/requirements.txt
+python scripts/check_jsonld.py                # the spec's example
+conformance/run_against_demo.sh               # conformance suite + live JSON-LD check, per CORS setting
 ```
 
-CI (`.github/workflows/ci.yml`) runs all three.
+CI (`.github/workflows/ci.yml`) runs all of them.
 
-The API contract tests in `src/institutions_api.rs` call both public
-endpoints and validate the responses against the schemas in
-`api/openapi.yaml`, check their headers (`Link`, `Cache-Control`, `ETag` and
-`304 Not Modified`, CORS and the `OPTIONS` preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), and check that every field the spec
-maps with `x-schema-org` maps to the same term in the JSON-LD context.
-`scripts/check_jsonld.py` expands the spec's example with that context and
-checks the resulting RDF.
+The API contract tests in `src/institutions_api.rs` call the API in-process
+and validate the responses against the schemas in `api/openapi.yaml`, check
+their headers (`Link`, `Cache-Control`, the weak `ETag` and
+`304 Not Modified`, `HEAD`, CORS and the `OPTIONS` preflight on the list for
+each `CORS_ALLOWED_ORIGINS` setting, CORS on the context), the RFC 9457
+errors (404, 405, and 500/503 from a broken or missing registry file), and
+check that every field the spec maps with `x-schema-org` maps to the same
+term in the JSON-LD context. `scripts/check_jsonld.py` expands the spec's
+example with that context and checks the resulting RDF; with
+`--url <base>` it does the same for a live deployment's list and the context
+its `Link` header names.
 
-The context is revised separately from the API: revision 1
-(`api/institutions.context.r1.jsonld`, served at
-`/api/v1/institutions.context.r1.jsonld`) is cached indefinitely, so it never
-changes; a test fails if it does. To change the context, add the next
-revision (`.r2.jsonld`) with rows for it in `CONTEXTS` and the tests'
-`CONTEXT_SHA256` (in `src/institutions_api.rs`), and point the spec's `Link`
-header at it. Every revision stays served, and the tests check that each is
+`conformance/` is a black-box suite for any implementation of the spec, in
+any language: it takes its expectations from `api/openapi.yaml` and the
+context files only.
+
+```bash
+API_BASE_URL=https://tms.example.org API_CORS='https://portal.example.org' \
+    python -m pytest conformance
+```
+
+`API_CORS` is the deployment's allowed-origin setting (empty, `*`, or
+comma-separated origins). `run_against_demo.sh` starts the demo three times,
+once per kind of setting, and runs the suite and `check_jsonld.py --url`
+against each. The 500 and 503 responses cannot be caused from outside, so
+only the in-process tests cover them.
+
+The context is revised separately from the API: each revision
+(`api/institutions.context.r<n>.jsonld`, served at
+`/api/v1/institutions.context.r<n>.jsonld`) is cached indefinitely, so it never
+changes; a test fails if it does. Revision 2 is revision 1 without
+`@version: 1.1`, which it did not need. To change the context, add the next
+revision (`.r3.jsonld`) with rows for it in `CONTEXTS` and the tests'
+`CONTEXT_SHA256` (in `src/institutions_api.rs`), add it to the spec's
+`revision` enum, and point the spec's `Link` header and context example at
+it. Every revision stays served, and the tests check that each is
 unchanged, has its own file, is documented in the spec, and that the `Link`
-header and the spec's example name the latest.
+header and the spec's examples name the latest. `api/schema-org.md` explains
+the choice of linked-data terms.
 
 The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries
 `redirect_idp_domain`, identity/domain matching (including look-alike
