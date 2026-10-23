@@ -1,15 +1,17 @@
-//! The public institutions API, as specified in api/openapi.yaml:
+//! The public institutions API, as specified in api/openapi.yaml, with both
+//! parts of its optional addendum, api/openapi.addendum.yaml:
 //!
-//!   GET     /api/v1/institutions                  the approved institutions
-//!   OPTIONS /api/v1/institutions                  CORS preflight for that list
-//!   GET     /api/v1/contexts/institutions/<n>     each revision of the JSON-LD context for that list
+//!   GET     /v1/tms/institutions                  the approved institutions (core)
+//!   OPTIONS /v1/tms/institutions                  CORS preflight for that list (addendum)
+//!   GET     /v1/tms/contexts/institutions/<n>     each revision of the JSON-LD context for that list (addendum)
 //!
-//! Other methods on those paths get a 405, as an RFC 9457 problem; every
-//! response carries `X-Content-Type-Options: nosniff`. Kept apart from the
-//! demo's login flow so it depends only on the registry, the deployment's
-//! base URL and its CORS setting.
+//! Every response carries `X-Content-Type-Options: nosniff`. Beyond the
+//! spec, it follows RFC 9110 for HEAD, If-Match (412) and other methods
+//! (405), as RFC 9457 problems. Kept apart from the demo's login flow so it
+//! depends only on the registry, the deployment's base URL and its CORS
+//! setting.
 
-use crate::institutions::{ListType, RegistryError, RegistrySource};
+use crate::institutions::{Institution, Provider, RegistryError, RegistrySource};
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
@@ -18,11 +20,13 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use log::error;
+use serde::Serialize;
 use serde_json::json;
 
-pub const LIST_PATH: &str = "/api/v1/institutions";
+pub const LIST_PATH: &str = "/v1/tms/institutions";
 /// The route of every context revision.
-const CONTEXT_ROUTE: &str = "/api/v1/contexts/institutions/{revision}";
+const CONTEXT_ROUTE: &str = "/v1/tms/contexts/institutions/{revision}";
 /// The `Allow` header of the list's preflight and 405s.
 const LIST_ALLOW: &str = "GET, HEAD, OPTIONS";
 /// The `Allow` header of a context's 405s.
@@ -43,11 +47,66 @@ pub struct ContextRevision {
 /// changes, so a changed context is a new row (and file) for the next
 /// revision; earlier rows stay, so their URLs keep working, and the list's
 /// Link header moves to the last one. The tests pin each row's content to
-/// the spec's `x-context-sha256`.
+/// the addendum's `x-context-sha256`.
 pub const CONTEXTS: &[ContextRevision] = &[ContextRevision { revision: 1, body: include_str!("../api/institutions.context.r1.jsonld") }];
 
+/// The list as the API sends it: the API's own model, kept apart from the
+/// registry's `Institution` so the stored data and the response can change
+/// separately. The `type` fields are the addendum's linked-data view.
+#[derive(Debug, Serialize)]
+struct InstitutionsResponse<'a> {
+    /// JSON-LD type (aliased to `@type` by the context): schema:ItemList.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    status: &'static str,
+    message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_version: Option<&'a str>,
+    result: Vec<InstitutionEntry<'a>>,
+}
+
+/// One entry of the list. Every field is written, `null` where it does not
+/// apply; approval is not, since the list holds only approved entries.
+#[derive(Debug, Serialize)]
+struct InstitutionEntry<'a> {
+    /// JSON-LD type: schema:Organization.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: &'a str,
+    name: &'a str,
+    provider: Provider,
+    redirect_idp_domain: Option<&'a str>,
+    idp_logout_url: Option<&'a str>,
+}
+
+impl<'a> From<&'a Institution> for InstitutionEntry<'a> {
+    fn from(i: &'a Institution) -> Self {
+        InstitutionEntry {
+            kind: "Organization",
+            id: &i.id,
+            name: &i.name,
+            provider: i.provider,
+            redirect_idp_domain: i.redirect_idp_domain.as_deref(),
+            idp_logout_url: i.idp_logout_url.as_deref(),
+        }
+    }
+}
+
+/// Checks the deployment's base URL (`BASE_URL`) once, at startup: an
+/// absolute http(s) URL in canonical form, with no query, fragment or
+/// trailing `/`, since the context paths are appended to it in the list's
+/// Link header.
+pub fn parse_base_url(raw: &str) -> Result<String, String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("BASE_URL {raw:?}: {e}"))?;
+    let canonical = url.as_str().strip_suffix('/').unwrap_or(url.as_str());
+    let ok = matches!(url.scheme(), "http" | "https") && url.query().is_none() && url.fragment().is_none() && canonical == raw;
+    ok.then(|| raw.to_string()).ok_or_else(|| {
+        format!("BASE_URL {raw:?} must be an http(s) URL like https://host[:port][/path], with no query, fragment or trailing '/'")
+    })
+}
+
 pub fn context_path(revision: u32) -> String {
-    format!("/api/v1/contexts/institutions/{revision}")
+    format!("/v1/tms/contexts/institutions/{revision}")
 }
 
 /// The revision the list's Link header names.
@@ -63,7 +122,7 @@ fn context_revision(digits: &str) -> Option<&'static ContextRevision> {
 }
 
 /// Which other origins may read the list (`CORS_ALLOWED_ORIGINS`), as the
-/// spec's CORS rule for `/api/v1/institutions` describes.
+/// addendum's CORS rule for `/v1/tms/institutions` describes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Cors {
     /// Same-origin clients only: no CORS headers.
@@ -126,17 +185,25 @@ impl Cors {
 #[derive(Clone)]
 struct ApiState {
     registry: RegistrySource,
-    base_url: String,
+    /// The list's Link header, naming the latest context.
+    link: HeaderValue,
     cors: Cors,
 }
 
-/// The API's routes, ready to merge into an app with any state.
+/// The API's routes, ready to merge into an app with any state. `base_url`
+/// must have passed `parse_base_url`.
 pub fn router<S: Clone + Send + Sync + 'static>(registry: RegistrySource, base_url: String, cors: Cors) -> Router<S> {
+    // The Link header tells JSON-LD processors where the context is.
+    let link = format!(
+        r#"<{base_url}{}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#,
+        context_path(latest_context().revision)
+    );
+    let link = HeaderValue::from_str(&link).unwrap_or_else(|_| panic!("BASE_URL {base_url:?} was not checked by parse_base_url"));
     Router::new()
         .route(LIST_PATH, get(list_institutions).options(preflight_institutions).fallback(list_method_not_allowed))
         .route(CONTEXT_ROUTE, get(get_context).fallback(context_method_not_allowed))
         .layer(map_response(no_sniff))
-        .with_state(ApiState { registry, base_url, cors })
+        .with_state(ApiState { registry, link, cors })
 }
 
 /// Every response from the API: browsers must not guess another media type.
@@ -162,7 +229,7 @@ fn problem(status: StatusCode, detail: &str, mut headers: HeaderMap) -> Response
 /// 503 for institution data that could not be read (worth a retry), 500 for
 /// data that is invalid. The cause goes to the server's log, not to the public.
 fn registry_problem(e: &RegistryError, headers: HeaderMap) -> Response {
-    eprintln!("institutions list: {e}");
+    error!("institutions list: {e}");
     match e {
         RegistryError::Unavailable(_) => {
             problem(StatusCode::SERVICE_UNAVAILABLE, "The institution data cannot be read right now.", headers)
@@ -246,23 +313,14 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
         }
         None => add_list_validators(&mut out, etag.as_deref()),
     }
-    // `type` makes the list a schema:ItemList under the JSON-LD context, and
-    // the Link header tells JSON-LD processors where that context is.
-    let link = format!(
-        r#"<{}{}>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json""#,
-        api.base_url,
-        context_path(revision)
-    );
-    out.insert(header::LINK, HeaderValue::from_str(&link).expect("BASE_URL is a valid header value"));
-    let mut body = json!({
-        "type": ListType::ItemList,
-        "status": "success",
-        "message": "Approved institutions.",
-        "result": registry.approved(),
-    });
-    if let Some(v) = registry.data_version() {
-        body["data_version"] = v.into();
-    }
+    out.insert(header::LINK, api.link.clone());
+    let body = InstitutionsResponse {
+        kind: "ItemList",
+        status: "success",
+        message: "Approved institutions.",
+        data_version: registry.data_version(),
+        result: registry.approved().map(InstitutionEntry::from).collect(),
+    };
     (out, Json(body)).into_response()
 }
 
@@ -336,10 +394,12 @@ async fn context_method_not_allowed(method: Method, Path(revision): Path<String>
     problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
 }
 
-/// Contract tests: the responses are checked against api/openapi.yaml itself.
-/// The spec's own consistency (examples, context agreement, revision
-/// bookkeeping) is checked by scripts/check_spec.py, and conformance/ checks
-/// the same contract over HTTP against any deployment.
+/// Contract tests: the responses are checked against api/openapi.yaml and its
+/// addendum themselves, and the RFC 9110 behaviour beyond them (HEAD,
+/// If-Match, 405) against the constants here. The documents' own
+/// consistency (examples, context agreement, revision bookkeeping) is
+/// checked by scripts/check_spec.py, and conformance/ checks the same
+/// contract over HTTP against any deployment.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,10 +411,11 @@ mod tests {
     use tower::ServiceExt;
 
     const SPEC: &str = include_str!("../api/openapi.yaml");
+    const ADDENDUM: &str = include_str!("../api/openapi.addendum.yaml");
     const MOCK: &str = include_str!("../mock/approved_institutions.json");
     const BASE: &str = "https://tms.example.org";
-    /// The spec's path for every context revision.
-    const CONTEXT_SPEC_PATH: &str = "/api/v1/contexts/institutions/{revision}";
+    /// The addendum's path for every context revision.
+    const CONTEXT_SPEC_PATH: &str = "/v1/tms/contexts/institutions/{revision}";
 
     /// The mock registry's ETag: its version and the latest context revision.
     fn mock_etag() -> String {
@@ -374,19 +435,27 @@ mod tests {
         serde_yaml::from_str(SPEC).expect("api/openapi.yaml parses")
     }
 
-    /// A validator for one of the spec's component schemas.
-    fn validator(name: &str) -> jsonschema::Validator {
+    fn addendum() -> Value {
+        serde_yaml::from_str(ADDENDUM).expect("api/openapi.addendum.yaml parses")
+    }
+
+    /// A validator for one of a document's component schemas.
+    fn validator(doc: &Value, name: &str) -> jsonschema::Validator {
         let schema = json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$ref": format!("#/components/schemas/{name}"),
-            "components": spec()["components"],
+            "components": doc["components"],
         });
         jsonschema::options().should_validate_formats(true).build(&schema).expect("schema compiles")
     }
 
-    fn assert_valid(name: &str, value: &Value) {
-        let errors: Vec<String> = validator(name).iter_errors(value).map(|e| format!("{} at {}", e, e.instance_path())).collect();
+    fn assert_valid_in(doc: &Value, name: &str, value: &Value) {
+        let errors: Vec<String> = validator(doc, name).iter_errors(value).map(|e| format!("{} at {}", e, e.instance_path())).collect();
         assert!(errors.is_empty(), "{name}: {errors:#?}");
+    }
+
+    fn assert_valid(name: &str, value: &Value) {
+        assert_valid_in(&spec(), name, value);
     }
 
     /// Whether `value` fits the schema of one of the spec's component headers.
@@ -445,11 +514,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_conforms_to_the_spec() {
+    async fn list_conforms_to_the_spec_and_addendum() {
         let (status, headers, body) = get(MOCK, LIST_PATH, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
         assert_eq!(header(&headers, header::LINK), Some(link_to(&context_path(latest_context().revision)).as_str()));
+        assert_eq!(header(&headers, header::X_CONTENT_TYPE_OPTIONS), Some(spec_header("NoSniff").as_str()));
         assert_eq!(header(&headers, header::CACHE_CONTROL), Some(spec_header("ListCacheControl").as_str()));
         assert_eq!(header(&headers, header::ETAG), Some(mock_etag().as_str()));
         assert!(header_fits("ETag", &mock_etag()));
@@ -459,7 +529,27 @@ mod tests {
 
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_valid("InstitutionsResponse", &body);
+        assert_valid_in(&addendum(), "LinkedList", &body);
         assert_eq!(body["data_version"], "mock-0.1.0");
+        // The API model's fields, not the registry's: no `approved`.
+        let fields = ["type", "id", "name", "provider", "redirect_idp_domain", "idp_logout_url"];
+        for entry in body["result"].as_array().unwrap() {
+            let mut keys: Vec<&str> = entry.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort();
+            let mut expected = fields.to_vec();
+            expected.sort();
+            assert_eq!(keys, expected, "{entry}");
+        }
+    }
+
+    #[test]
+    fn base_url_is_checked_at_startup() {
+        for good in ["https://tms.example.org", "http://127.0.0.1:8080", "https://a.org/tms"] {
+            assert_eq!(parse_base_url(good).as_deref(), Ok(good), "{good}");
+        }
+        for bad in ["", "tms.example.org", "ftp://a.org", "https://a.org/", "https://a.org?x=1", "https://a.org#x", "https://A.org", "https://a.org/a b", "https://a.org/<x>"] {
+            assert!(parse_base_url(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// Query strings and Accept change nothing.
@@ -477,8 +567,8 @@ mod tests {
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
     }
 
-    /// HEAD gets GET's status and headers, without the body, on the list
-    /// (also when If-None-Match matches) and on the contexts.
+    /// HEAD (RFC 9110) gets GET's status and headers, without the body, on
+    /// the list (also when If-None-Match matches) and on the contexts.
     #[tokio::test]
     async fn head_matches_get() {
         let context = context_path(latest_context().revision);
@@ -496,14 +586,28 @@ mod tests {
 
     const PORTAL: &str = "https://portal.example.org";
 
-    /// The spec's `const` for one of its component headers.
-    fn spec_header(name: &str) -> String {
-        spec()["components"]["headers"][name]["schema"]["const"].as_str().unwrap().to_string()
+    /// The value a header object gives: its `const`, or for a list-valued
+    /// header its `x-required-members`, which the demo sends with nothing added.
+    fn header_value(header: &Value) -> String {
+        match header["schema"]["const"].as_str() {
+            Some(exact) => exact.to_string(),
+            None => header["x-required-members"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect::<Vec<_>>().join(", "),
+        }
     }
 
-    /// The spec's `const` for a header of the preflight's 204.
+    /// The value the spec gives one of its component headers.
+    fn spec_header(name: &str) -> String {
+        header_value(&spec()["components"]["headers"][name])
+    }
+
+    /// The value the addendum gives one of its component headers.
+    fn addendum_header(name: &str) -> String {
+        header_value(&addendum()["components"]["headers"][name])
+    }
+
+    /// The value the addendum gives a header of the preflight's 204.
     fn preflight_header(name: &str) -> String {
-        spec()["paths"][LIST_PATH]["options"]["responses"]["204"]["headers"][name]["schema"]["const"].as_str().unwrap().to_string()
+        header_value(&addendum()["paths"][LIST_PATH]["options"]["responses"]["204"]["headers"][name])
     }
 
     async fn preflight(cors: Cors, origin: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
@@ -521,7 +625,7 @@ mod tests {
         let (status, headers, body) = preflight(cors.clone(), Some(PORTAL)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(body.is_empty());
-        assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ListAllow").as_str()));
+        assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW));
         for (name, spec_name) in [
             (header::ACCESS_CONTROL_ALLOW_METHODS, "Access-Control-Allow-Methods"),
             (header::ACCESS_CONTROL_ALLOW_HEADERS, "Access-Control-Allow-Headers"),
@@ -565,8 +669,8 @@ mod tests {
             let (status, headers, _) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
             assert_eq!(status, expected);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{status}");
-            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(spec_header("CorsExposeHeaders").as_str()));
-            assert_eq!(header(&headers, header::VARY), Some(spec_header("VaryOrigin").as_str()));
+            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(addendum_header("CorsExposeHeaders").as_str()));
+            assert_eq!(header(&headers, header::VARY), Some(addendum_header("VaryOrigin").as_str()));
             assert!(header(&headers, header::ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
         }
         for origin in [None, Some("https://evil.example.org"), Some("https://portal.example.org.evil.org")] {
@@ -671,7 +775,8 @@ mod tests {
         assert!(entity_tags(b"").is_empty());
     }
 
-    /// Every tag here is weak, so If-Match (strong comparison) only passes as `*`.
+    /// Every tag here is weak, so If-Match (strong comparison, RFC 9110
+    /// §13.1.1) only passes as `*`.
     #[tokio::test]
     async fn if_match_passes_only_as_any() {
         let cors = Cors::Origins(vec![PORTAL.into()]);
@@ -737,13 +842,43 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
+    /// A new `data_version` gives a new ETag: the old tag no longer matches,
+    /// and the new one does.
+    #[tokio::test]
+    async fn etag_follows_the_data() {
+        let path = std::env::temp_dir().join(format!("registry-{}.json", uuid::Uuid::new_v4()));
+        let source = RegistrySource::File(path.to_str().unwrap().into());
+        let get_with = |tag: Option<HeaderValue>| {
+            let source = source.clone();
+            async move {
+                let headers: Vec<_> = tag.map(|t| (header::IF_NONE_MATCH, t)).into_iter().collect();
+                send_to(source, Cors::SameOrigin, Method::GET, LIST_PATH, &headers).await
+            }
+        };
+        std::fs::write(&path, MOCK).unwrap();
+        let (_, headers, _) = get_with(None).await;
+        let old = headers[header::ETAG].clone();
+        assert_eq!(get_with(Some(old.clone())).await.0, StatusCode::NOT_MODIFIED);
+
+        std::fs::write(&path, MOCK.replace("mock-0.1.0", "mock-0.1.1").replace("\"approved\": false", "\"approved\": true")).unwrap();
+        let (status, headers, body) = get_with(Some(old.clone())).await;
+        assert_eq!(status, StatusCode::OK, "the old tag no longer matches");
+        let new = headers[header::ETAG].clone();
+        assert_ne!(new, old);
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data_version"], "mock-0.1.1");
+        assert_eq!(body["result"].as_array().unwrap().len(), 10, "every entry now approved");
+        assert_eq!(get_with(Some(new)).await.0, StatusCode::NOT_MODIFIED);
+        std::fs::remove_file(&path).unwrap();
+    }
+
     #[tokio::test]
     async fn other_methods_get_method_not_allowed() {
         let cors = Cors::Origins(vec![PORTAL.into()]);
         for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::TRACE] {
             let (status, headers, body) = send(MOCK, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
             assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
-            assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ListAllow").as_str()), "{method}");
+            assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{method}");
             assert_eq!(header(&headers, header::VARY), Some("Origin"), "{method}");
@@ -752,7 +887,7 @@ mod tests {
         for method in [Method::POST, Method::OPTIONS, Method::DELETE] {
             let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &context, &[]).await;
             assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
-            assert_eq!(header(&headers, header::ALLOW), Some(spec_header("ContextAllow").as_str()), "{method}");
+            assert_eq!(header(&headers, header::ALLOW), Some(CONTEXT_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method}");
         }
     }
@@ -763,7 +898,7 @@ mod tests {
     async fn unpublished_revisions_are_not_found() {
         let next = (CONTEXTS.len() + 1).to_string();
         for revision in ["0", "01", "+1", "r1", next.as_str()] {
-            let path = format!("/api/v1/contexts/institutions/{revision}");
+            let path = format!("/v1/tms/contexts/institutions/{revision}");
             for method in [Method::GET, Method::HEAD, Method::POST] {
                 let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &path, &[]).await;
                 assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
@@ -789,7 +924,7 @@ mod tests {
             (Method::GET, &context, &[]),
             (Method::GET, &context, &[(header::IF_NONE_MATCH, "*")]),
             (Method::POST, &context, &[]),
-            (Method::GET, "/api/v1/contexts/institutions/0", &[]),
+            (Method::GET, "/v1/tms/contexts/institutions/0", &[]),
         ];
         for (method, path, headers) in cases {
             let (status, out, _) = send(MOCK, Cors::Any, method.clone(), path, headers).await;
@@ -807,7 +942,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{path}");
             assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
-            assert_eq!(header(&headers, header::CACHE_CONTROL), Some(spec_header("ContextCacheControl").as_str()));
+            assert_eq!(header(&headers, header::CACHE_CONTROL), Some(addendum_header("ContextCacheControl").as_str()));
             assert_eq!(body, ctx.body.as_bytes(), "{path}");
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert!(body["@context"].is_object(), "{path}");
@@ -823,19 +958,19 @@ mod tests {
     }
 
     /// Published revisions are cached indefinitely, so they are frozen: each
-    /// served revision has the SHA-256 the spec publishes for it, and the
+    /// served revision has the SHA-256 the addendum publishes for it, and the
     /// revisions run r1, r2, ... with no gaps. To change the context, add
     /// api/institutions.context.r<n+1>.jsonld and a CONTEXTS row for it, add
-    /// n+1 to the spec's `revision` enum and its hash to `x-context-sha256`,
-    /// and point the spec's Link header, ETag examples and context example at
-    /// it; these tests and scripts/check_spec.py catch a missed step.
+    /// n+1 to the addendum's `revision` enum and its hash to
+    /// `x-context-sha256`, and point the addendum's Link header and context
+    /// example at it; these tests and scripts/check_spec.py catch a missed step.
     #[test]
     fn published_contexts_do_not_change() {
         let revisions: Vec<u32> = CONTEXTS.iter().map(|c| c.revision).collect();
         assert_eq!(revisions, (1..=CONTEXTS.len() as u32).collect::<Vec<_>>(), "revisions run r1, r2, ... with no gaps");
-        let spec = spec();
-        let published = spec["paths"][CONTEXT_SPEC_PATH]["get"]["x-context-sha256"].as_object().unwrap();
-        assert_eq!(published.len(), CONTEXTS.len(), "the spec publishes one SHA-256 per served revision");
+        let addendum = addendum();
+        let published = addendum["paths"][CONTEXT_SPEC_PATH]["get"]["x-context-sha256"].as_object().unwrap();
+        assert_eq!(published.len(), CONTEXTS.len(), "the addendum publishes one SHA-256 per served revision");
         for ctx in CONTEXTS {
             let sha = published[&ctx.revision.to_string()].as_str().unwrap();
             assert_eq!(sha256(ctx.body), sha, "context r{} changed: publish it as r{} instead", ctx.revision, CONTEXTS.len() + 1);
@@ -863,18 +998,18 @@ mod tests {
         }
     }
 
-    /// The spec's `revision` enum lists every served revision and no other,
-    /// and its Link example names the latest one at the served path.
+    /// The addendum's `revision` enum lists every served revision and no
+    /// other, and its Link example names the latest one at the served path.
     #[test]
-    fn spec_documents_every_revision_and_links_the_latest() {
-        let spec = spec();
-        let param = &spec["components"]["parameters"]["Revision"];
+    fn addendum_documents_every_revision_and_links_the_latest() {
+        let addendum = addendum();
+        let param = &addendum["components"]["parameters"]["Revision"];
         assert_eq!(param["name"], "revision");
         let documented: Vec<&str> = param["schema"]["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         let served: Vec<String> = CONTEXTS.iter().map(|c| c.revision.to_string()).collect();
         assert_eq!(documented, served);
-        let example = spec["components"]["headers"]["ContextLink"]["example"].as_str().unwrap();
-        assert_eq!(example, link_to(&context_path(latest_context().revision)), "the spec's Link example");
+        let example = addendum["components"]["headers"]["ContextLink"]["example"].as_str().unwrap();
+        assert_eq!(example, link_to(&context_path(latest_context().revision)), "the addendum's Link example");
     }
 
     /// The registry's providers are exactly the spec's known values, under

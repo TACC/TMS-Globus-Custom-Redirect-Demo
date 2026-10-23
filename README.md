@@ -15,17 +15,24 @@ addition being `redirect_idp_domain`.
 
 ## What it shows
 
-1. `GET /api/v1/institutions` serves the approved entries of the registry
+1. `GET /v1/tms/institutions` serves the approved entries of the registry
    file `mock/approved_institutions.json` (`{ data_version, institutions }`) in a
-   Tapis-style envelope, `type / status / message / data_version / result`, as
-   specified in `api/openapi.yaml`. The registry is checked against the
+   Tapis-style envelope, `status / message / data_version / result`, as
+   specified in `api/openapi.yaml`. The demo also serves the optional
+   addendum, `api/openapi.addendum.yaml`: CORS for other origins, and a
+   JSON-LD view of the list (`type` fields, a `Link` header and the
+   contexts). The registry is checked against the
    spec's rules when it loads (unique ids, lower-case domains, `https`
    sign-out URLs, no domain for Tapis), so a bad entry stops the server
    instead of being served. Each request reads the file again, so edits
    take effect without a restart; if it has gone missing the list answers
    503, and if it no longer passes the checks, 500 (RFC 9457 problem
    details, as the spec gives them). The list is public, so
-   `approved: false` entries are left out of it. They stay in the registry:
+   `approved: false` entries are left out of it, and the list has no
+   `approved` field: the registry's entries (`src/institutions.rs`) and
+   the API's (`src/institutions_api.rs`) are separate models, as
+   `tms_portal` keeps `obj_model` apart from `api_obj_model`. Unapproved
+   entries stay in the registry:
    `/login?institution=<id>` for one of them does not start a login but
    answers with a **Filtered** page (laid out like **Welcome**, with the
    institution's details) explaining that it is not on the approved list,
@@ -271,7 +278,7 @@ Set in `dev.env` (template: `dev.env.example`); environment variables override.
 | `BASE_URL`              | `http://localhost:8080` (no trailing `/`)          |
 | `BIND_ADDR`             | `127.0.0.1:8080`                                   |
 | `INSTITUTIONS_FILE`     | `mock/approved_institutions.json`                  |
-| `CORS_ALLOWED_ORIGINS`  | unset → same-origin only; `*` → any origin; or comma-separated origins (`https://host[:port]`) that may read `/api/v1/institutions` |
+| `CORS_ALLOWED_ORIGINS`  | unset → same-origin only; `*` → any origin; or comma-separated origins (`https://host[:port]`) that may read `/v1/tms/institutions` |
 | `GLOBUS_CLIENT_ID`      | required unless `GLOBUS_MOCK=true`                 |
 | `GLOBUS_CLIENT_SECRET`  | required unless `GLOBUS_MOCK=true`                 |
 | `GLOBUS_MOCK`           | unset → real Globus Auth; `true` → built-in mock (also stands in for Tapis) |
@@ -295,7 +302,7 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
   same change shown in `src/globus.rs::build_authorize_url`.
 - The approved list would naturally live in a DB table next to
   `identity_providers` / `allowed_redirects`, served at
-  `/api/v1/institutions`. The mocked JSON stands in for that.
+  `/v1/tms/institutions`. The mocked JSON stands in for that.
 - The callback check corresponds to a guard in `handle_callback` before
   `make_auth_token`, using the `preferred_username` / `organization` claims
   that `jwt_utils.rs` already reads.
@@ -308,79 +315,98 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 
 ```bash
 cargo test
-npx @redocly/cli@2.60.0 lint                  # the spec, configured by redocly.yaml
+npx @redocly/cli@2.60.0 lint                  # the spec and addendum, configured by redocly.yaml
 pip install -r conformance/requirements.txt
-python -m pytest scripts/check_spec.py        # the spec against itself and its contexts
-python scripts/check_jsonld.py                # the spec's example
+python -m pytest scripts/check_spec.py        # the spec and addendum against themselves and the contexts
+python scripts/check_jsonld.py                # the addendum's example
 conformance/run_against_demo.sh               # conformance suite + live JSON-LD check, per CORS setting
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of them.
 
-The spec's own checks need no implementation, so they travel with `api/`
-to any server's repository. `scripts/check_spec.py` checks that the
-examples fit their schemas, that the schemas refuse bad entries, that every
-field the spec maps with `x-schema-org` maps to the same term in the latest
-JSON-LD context (and every known `provider` value too), that the context
+`api/openapi.yaml` is the core of the API, all an implementation must
+serve: the list's `GET` with `200`, `304` (`If-None-Match` against a weak,
+opaque `ETag`), `500` and `503`. `api/openapi.addendum.yaml` is optional
+and adds to it: the list's CORS headers and `OPTIONS` preflight, and the
+linked-data view (`type` fields, `Link`, and the contexts at
+`/v1/tms/contexts/institutions/<n>`). Generic HTTP behaviour (`HEAD`,
+`If-Match`, `405` for other methods) follows RFC 9110 and is in neither.
+
+The documents' own checks need no implementation, so they travel with
+`api/` to any server's repository. `scripts/check_spec.py` checks that the
+examples fit their schemas (and that the addendum's example is the core's
+with `type` fields added), that the schemas refuse bad entries, that the
+latest JSON-LD context gives every field a term or `null` and maps no field
+the spec lacks (and maps every known `provider` value), that the context
 files, the `revision` enum and `x-context-sha256` agree, and that
-everywhere the spec names a revision it names the latest.
-`scripts/check_jsonld.py` expands the spec's example with that context and
-checks the resulting RDF, counting each mapped field against the entries;
-what each field must map to is read from the spec and the context. With
-`--url <base>` it does the same for a live deployment's list and the
-context its `Link` header names, and `--spec <path>` checks another copy of
-the spec.
+everywhere the addendum names a revision it names the latest.
+`scripts/check_jsonld.py` expands the addendum's example with that context
+and checks the resulting RDF, counting each mapped field against the
+entries; what each field maps to is read from the context. With `--url
+<base>` it does the same for a live deployment's list and the context its
+`Link` header names, and `--spec <path>` checks another copy of `api/`.
 
 The demo's API contract tests in `src/institutions_api.rs` call the API
 in-process and validate the responses against the schemas in
-`api/openapi.yaml`, check their headers (`Link`, `Cache-Control`, the weak
+`api/openapi.yaml` and its addendum, check their headers (`Link`, `Cache-Control`, the weak
 `ETag` `W/"<data_version>;r<n>"`, `If-None-Match` parsed by the RFC 9110
 grammar and `If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS`
 preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the
 context, `X-Content-Type-Options: nosniff` everywhere), the RFC 9457 errors
 (404 for an unpublished revision, 405, 412, and 500/503 from a broken or
 missing registry file), and that the served contexts and providers are the
-ones the spec publishes.
+ones the documents publish. `HEAD`, `If-Match` (412) and 405 are checked
+against RFC 9110 rather than the spec.
 
 `conformance/` is a black-box suite for any implementation of the spec, in
-any language: it takes every expectation from the spec (including the
-SHA-256 of each context revision, `x-context-sha256`), so it can be copied
-next to any copy of `openapi.yaml`.
+any language: it takes every expectation from the spec and addendum
+(including the SHA-256 of each context revision, `x-context-sha256`), so it
+can be copied next to any copy of `api/`.
 
 ```bash
-API_BASE_URL=https://tms.example.org API_CORS='https://portal.example.org' \
-    python -m pytest conformance            # API_SPEC=<path> for another copy of the spec
+API_BASE_URL=https://tms.example.org python -m pytest conformance     # the core only
+API_BASE_URL=https://tms.example.org API_ADDENDUM=1 API_CORS='https://portal.example.org' \
+    python -m pytest conformance                                      # the addendum too
 ```
 
-`API_CORS` is the deployment's allowed-origin setting (empty, `*`, or
-comma-separated origins). `API_EXTRA_HEADERS`, a JSON object, adds headers
-to every request (for a gateway's credentials, say); `check_jsonld.py
---url` honours it too. Header values are compared as the spec's "Header
-values" section allows: `Allow` exactly, `Vary`, `Link` and the
-`Access-Control-*` lists as members the response must at least carry, and
-`Cache-Control` as the directives it must carry; HEAD is compared with GET
-only on the headers the spec defines. `run_against_demo.sh` starts the demo
-three times, once per kind of setting, and runs the suite and
-`check_jsonld.py --url` against each. The 500 and 503 responses cannot be
-caused from outside, so only the in-process tests cover them.
+The core tests always run; `API_ADDENDUM=1` adds the addendum's, for a
+deployment that serves it. `API_CORS` is then its allowed-origin setting
+(empty, `*`, or comma-separated origins). `API_SPEC=<path>` tests another
+copy of the spec. `API_EXTRA_HEADERS`, a JSON object, adds headers to every
+request (for a gateway's credentials, say); `check_jsonld.py --url` honours
+it too. Header values are compared as the documents' "Header values"
+sections allow: a list-valued header (`Cache-Control`, `Vary`, the
+`Access-Control-*` lists) is a string with `x-required-members`, the
+members the response must at least carry, rather than a `const` that would
+refuse a deployment's additions; `Link` must carry at least its link.
+`run_against_demo.sh` starts the demo three times, once per kind of
+setting, runs the core suite alone against the first, as a deployment
+without the addendum would be tested, and the suite with the addendum and
+`check_jsonld.py --url` against each. The 500 and 503 responses, and the
+other requirements that need control of the data, cannot be tested from
+outside: `conformance/SERVER_TESTS.md` lists them for an implementation's
+own tests, with the demo test that covers each.
 
 To run the suite against a real deployment from CI, use
 `.github/workflows/conformance-external.yml`: start it by hand with the
-deployment's base URL and CORS setting, or call it from another workflow
-after a deploy. Gateway credentials go in the `CONFORMANCE_EXTRA_HEADERS`
-secret, as a JSON object.
+deployment's base URL (and, if it serves the addendum, `addendum` and its
+CORS setting), or call it from the implementation's repository after a
+deploy, with `spec_repository` and `spec_ref` naming this repository and
+commit, so nothing needs copying. Gateway credentials go in the
+`CONFORMANCE_EXTRA_HEADERS` secret, as a JSON object.
 
 The context is revised separately from the API: each revision
 (`api/institutions.context.r<n>.jsonld`, served at
-`/api/v1/contexts/institutions/<n>`) is cached indefinitely, so it never
+`/v1/tms/contexts/institutions/<n>`) is cached indefinitely, so it never
 changes; a test fails if it does. To change the context, add the next
 revision (`.r2.jsonld`) with a row for it in `CONTEXTS` (in
-`src/institutions_api.rs`), add it to the spec's `revision` enum and its
-hash to `x-context-sha256`, and point the spec's `Link` header, `ETag`
-examples and context example at it. The list's `ETag` names the context
-revision, so it changes with it. Every revision stays served, and the
-tests check that each is unchanged, has its own file, is documented in the
-spec, and that the `Link` header and the spec's examples name the latest.
+`src/institutions_api.rs`), add it to the addendum's `revision` enum and
+its hash to `x-context-sha256`, and point the addendum's `Link` header and
+context example at it. The demo's `ETag`, `W/"<data_version>;r<n>"`, names
+the context revision, so it changes with it, as the addendum requires.
+Every revision stays served, and the tests check that each is unchanged,
+has its own file, is documented in the addendum, and that the `Link`
+header and the addendum's examples name the latest.
 `api/schema-org.md` explains the choice of linked-data terms.
 
 The other tests cover: registry validation, only known institutions can be looked up, the authorize URL carries

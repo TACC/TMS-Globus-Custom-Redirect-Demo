@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Runs the conformance suite and the live JSON-LD check against the demo,
-# once for each kind of CORS setting: same origin only, any origin, and
-# listed origins. Needs conformance/requirements.txt installed; PYTHON picks
-# the interpreter (default python3).
+# Runs the conformance suite against the demo: first the core alone, as a
+# deployment without the addendum would be tested, then with the addendum
+# and the live JSON-LD check, once for each kind of CORS setting: same
+# origin only, any origin, and listed origins. Needs conformance/requirements.txt
+# installed; PYTHON picks the interpreter (default python3).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,18 +27,22 @@ for cors in "" "*" "https://portal.example.org,http://localhost:3000"; do
     target/debug/idp_redirect_demo >"$work/server-$port.log" 2>&1 &
   pids+=($!)
   for _ in $(seq 120); do
-    curl -s -o /dev/null "$base/api/v1/institutions" && break
+    curl -s -o /dev/null "$base/v1/tms/institutions" && break
     sleep 0.5
   done
-  if ! curl -s -o /dev/null "$base/api/v1/institutions"; then
+  if ! curl -s -o /dev/null "$base/v1/tms/institutions"; then
     cat "$work/server-$port.log"
     exit 1
   fi
 
-  echo "== CORS setting: '${cors}'"
   # An extra header on every request, as a gateway's credentials would be.
   export API_EXTRA_HEADERS='{"X-Conformance-Run": "demo"}'
-  API_BASE_URL="$base" API_CORS="$cors" PYTHONDONTWRITEBYTECODE=1 \
+  if [ -z "$cors" ]; then
+    echo "== Core only"
+    API_BASE_URL="$base" PYTHONDONTWRITEBYTECODE=1 "$python" -m pytest -q -p no:cacheprovider conformance
+  fi
+  echo "== Addendum, CORS setting: '${cors}'"
+  API_BASE_URL="$base" API_ADDENDUM=1 API_CORS="$cors" PYTHONDONTWRITEBYTECODE=1 \
     "$python" -m pytest -q -p no:cacheprovider conformance
   "$python" scripts/check_jsonld.py --url "$base"
 done

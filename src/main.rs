@@ -8,10 +8,10 @@
 //!   GET /                       landing page (Science Gateway template; Log in goes to /demo)
 //!   GET /static/...             the landing page's stylesheet, images and favicon
 //!   GET /demo                   demo page
-//!   GET /api/v1/institutions    the approved institutions (from the mocked registry), with a Link
+//!   GET /v1/tms/institutions    the approved institutions (from the mocked registry), with a Link
 //!                               header naming the JSON-LD context (see institutions_api.rs)
-//!   OPTIONS /api/v1/institutions  CORS preflight for that list (see CORS_ALLOWED_ORIGINS)
-//!   GET /api/v1/contexts/institutions/<n>  each revision of that JSON-LD context
+//!   OPTIONS /v1/tms/institutions  CORS preflight for that list (see CORS_ALLOWED_ORIGINS)
+//!   GET /v1/tms/contexts/institutions/<n>  each revision of that JSON-LD context
 //!   GET /login?institution=ID   build authorize URL + redirect (add &dry_run=true to just see it);
 //!                               unapproved institutions get the "Filtered" page instead
 //!   GET /login/callback         code -> userinfo -> approved-list and institution checks
@@ -86,6 +86,8 @@ struct Session {
 
 #[tokio::main]
 async fn main() {
+    // The API logs through the `log` facade, as tms_server and tms_portal do.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let (env, env_file) = Settings::load().unwrap_or_else(|e| panic!("{e}"));
     if env.len() == 0 {
         println!("Settings: no {env_file} (copy dev.env.example); using the environment and defaults");
@@ -93,12 +95,11 @@ async fn main() {
         println!("Settings: {} value(s) from {env_file} (environment variables override)", env.len());
     }
 
-    let base_url = env.or("BASE_URL", "http://localhost:8080");
     // Paths are appended to it (e.g. the institutions list's Link header).
-    if base_url.ends_with('/') {
-        eprintln!("BASE_URL must not end with '/': {base_url}");
+    let base_url = institutions_api::parse_base_url(&env.or("BASE_URL", "http://localhost:8080")).unwrap_or_else(|e| {
+        eprintln!("{e}");
         std::process::exit(1);
-    }
+    });
     let bind = env.or("BIND_ADDR", "127.0.0.1:8080");
     let inst_file = env.or("INSTITUTIONS_FILE", "mock/approved_institutions.json");
     let cors = institutions_api::Cors::parse(&env.or("CORS_ALLOWED_ORIGINS", "")).unwrap_or_else(|e| {
@@ -148,7 +149,7 @@ async fn main() {
     let registry = Registry::load(&inst_file).unwrap_or_else(|e| panic!("{e}"));
     println!(
         "Loaded {} approved institution(s) from {inst_file}",
-        registry.approved().len()
+        registry.approved().count()
     );
     println!(
         "Mode: {}",

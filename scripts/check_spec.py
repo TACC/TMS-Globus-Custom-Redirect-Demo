@@ -1,14 +1,15 @@
-"""Checks api/openapi.yaml against itself and its JSON-LD context files, with
-no implementation involved: the examples fit their schemas, the schemas
-refuse what they should, every field maps to the same term in the latest
-context, and the context revisions are bookkept consistently (files, enum,
-hashes, and every place the spec names a revision).
+"""Checks api/openapi.yaml and its addendum against themselves and the
+JSON-LD context files, with no implementation involved: the examples fit
+their schemas, the schemas refuse what they should, every field has a term
+(or null) in the latest context, and the context revisions are bookkept
+consistently (files, enum, hashes, and every place the addendum names a
+revision).
 
     pip install -r conformance/requirements.txt
     python -m pytest scripts/check_spec.py        # API_SPEC=<path> for another copy
 
-It needs only the spec and the context files next to it, so it travels
-with them to any implementation's repository.
+It needs only the spec, the addendum and the context files next to them,
+so it travels with them to any implementation's repository.
 """
 
 import hashlib
@@ -22,34 +23,41 @@ import pytest
 import yaml
 
 SPEC_PATH = pathlib.Path(os.environ.get("API_SPEC") or pathlib.Path(__file__).resolve().parent.parent / "api/openapi.yaml")
-SPEC_TEXT = SPEC_PATH.read_text()
-SPEC = yaml.safe_load(SPEC_TEXT)
 API_DIR = SPEC_PATH.parent
+SPEC = yaml.safe_load(SPEC_PATH.read_text())
+ADDENDUM_PATH = API_DIR / "openapi.addendum.yaml"
+ADDENDUM_TEXT = ADDENDUM_PATH.read_text()
+ADDENDUM = yaml.safe_load(ADDENDUM_TEXT)
+DOCS = {"openapi.yaml": SPEC, "openapi.addendum.yaml": ADDENDUM}
 COMPONENTS = SPEC["components"]
 SCHEMAS = COMPONENTS["schemas"]
 FORMAT_CHECKER = jsonschema.Draft202012Validator.FORMAT_CHECKER
 
-LIST = "/api/v1/institutions"
-CONTEXT = next(p for p in SPEC["paths"] if "{revision}" in p)
-CONTEXT_GET = SPEC["paths"][CONTEXT]["get"]
-REVISIONS = COMPONENTS["parameters"]["Revision"]["schema"]["enum"]
+LIST = "/v1/tms/institutions"
+CONTEXT = next(p for p in ADDENDUM["paths"] if "{revision}" in p)
+CONTEXT_GET = ADDENDUM["paths"][CONTEXT]["get"]
+REVISIONS = ADDENDUM["components"]["parameters"]["Revision"]["schema"]["enum"]
 LATEST = max(int(r) for r in REVISIONS)
 LINK_REL = 'rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"'
 
 
-def validator(name):
-    schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": f"#/components/schemas/{name}", "components": COMPONENTS}
+def validator(name, doc=SPEC):
+    schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": f"#/components/schemas/{name}", "components": doc["components"]}
     return jsonschema.Draft202012Validator(schema, format_checker=FORMAT_CHECKER)
 
 
-def errors(name, value):
-    return [f"{e.message} at {list(e.absolute_path)}" for e in validator(name).iter_errors(value)]
+def errors(name, value, doc=SPEC):
+    return [f"{e.message} at {list(e.absolute_path)}" for e in validator(name, doc).iter_errors(value)]
 
 
-def resolve(obj):
+def resolve(obj, doc):
+    """`obj` with its $refs followed, within `doc` or into the core spec."""
     while "$ref" in obj:
-        *_, kind, name = obj["$ref"].split("/")
-        obj = COMPONENTS[kind][name]
+        file, _, pointer = obj["$ref"].partition("#")
+        if file:
+            doc = DOCS[pathlib.PurePosixPath(file).name]
+        *_, kind, name = pointer.split("/")
+        obj = doc["components"][kind][name]
     return obj
 
 
@@ -62,54 +70,71 @@ def latest_context():
 
 
 def all_responses():
-    """(where, response) for every response the spec defines, refs resolved."""
-    for path, item in SPEC["paths"].items():
-        for method, op in item.items():
-            for status, resp in op["responses"].items():
-                yield f"{method.upper()} {path} {status}", resolve(resp)
-    for name, resp in COMPONENTS["responses"].items():
-        yield f"components/responses/{name}", resp
+    """(where, response, doc) for every response either document defines."""
+    for doc_name, doc in DOCS.items():
+        for path, item in doc["paths"].items():
+            for method, op in item.items():
+                for status, resp in op["responses"].items():
+                    yield f"{doc_name} {method.upper()} {path} {status}", resp, doc
+        for name, resp in doc["components"].get("responses", {}).items():
+            yield f"{doc_name} components/responses/{name}", resp, doc
+
+
+def list_example(doc):
+    return doc["paths"][LIST]["get"]["responses"]["200"]["content"]["application/json"]["examples"]
 
 
 # Examples
 
 
 def test_list_examples_conform():
-    examples = SPEC["paths"][LIST]["get"]["responses"]["200"]["content"]["application/json"]["examples"]
-    assert examples
-    for name, example in examples.items():
-        assert not errors("InstitutionsResponse", example["value"]), name
-        assert "mock" not in name, f"example {name!r} names the demo"
+    for doc in DOCS.values():
+        examples = list_example(doc)
+        assert examples
+        for name, example in examples.items():
+            assert not errors("InstitutionsResponse", example["value"]), name
+            assert "mock" not in name, f"example {name!r} names the demo"
+
+
+def test_addendum_example_is_the_core_example_with_types():
+    for name, example in list_example(ADDENDUM).items():
+        assert not errors("LinkedList", example["value"], ADDENDUM), name
+        core = list_example(SPEC)[name]["value"]
+        untyped = {k: v for k, v in example["value"].items() if k != "type"}
+        untyped["result"] = [{k: v for k, v in e.items() if k != "type"} for e in untyped["result"]]
+        assert untyped == core, name
+
+
+def problem_examples():
+    for where, resp, doc in all_responses():
+        for example in resolve(resp, doc).get("content", {}).get("application/problem+json", {}).get("examples", {}).values():
+            yield where, example["value"]
 
 
 def test_problem_examples_conform():
     checked = 0
-    for name, resp in COMPONENTS["responses"].items():
-        for example in resp.get("content", {}).get("application/problem+json", {}).get("examples", {}).values():
-            value = example["value"]
-            assert not errors("Problem", value), name
-            assert value["title"] == http.HTTPStatus(value["status"]).phrase, name
-            checked += 1
-    assert checked >= 7, f"problem examples checked: {checked}"
+    for where, value in problem_examples():
+        assert not errors("Problem", value), where
+        assert value["title"] == http.HTTPStatus(value["status"]).phrase, where
+        checked += 1
+    assert checked >= 3, f"problem examples checked: {checked}"
 
 
 def test_every_problem_response_has_an_example():
-    for name, resp in COMPONENTS["responses"].items():
-        problem = resp.get("content", {}).get("application/problem+json")
+    for where, resp, doc in all_responses():
+        problem = resolve(resp, doc).get("content", {}).get("application/problem+json")
         if problem:
-            assert problem.get("examples"), name
+            assert problem.get("examples"), where
 
 
 # Schemas
 
 GOOD = {
-    "type": "Organization",
     "id": "a",
     "name": "A",
     "provider": "globus",
     "redirect_idp_domain": "a.edu",
     "idp_logout_url": "https://idp.a.edu/logout",
-    "approved": True,
 }
 
 
@@ -132,13 +157,23 @@ def test_a_good_entry_passes():
         ("idp_logout_url", "https://idp.a.edu/log out"),
         ("idp_logout_url", "https://a.edu/ü[x]"),
         ("idp_logout_url", "https://a.edu/a#b#c"),
-        ("approved", False),
-        ("type", "Thing"),
         ("provider", "Not-A-Value"),
     ],
 )
 def test_bad_entries_are_refused(field, bad):
     assert errors("Institution", {**GOOD, field: bad}), f"{field} = {bad!r}"
+
+
+@pytest.mark.parametrize("field", ["id", "name", "provider", "redirect_idp_domain", "idp_logout_url"])
+def test_every_field_is_required(field):
+    assert errors("Institution", {k: v for k, v in GOOD.items() if k != field}), field
+
+
+def test_linked_types_are_checked():
+    good = {"type": "ItemList", "result": [{"type": "Organization"}]}
+    assert not errors("LinkedList", good, ADDENDUM)
+    assert errors("LinkedList", {**good, "type": "Thing"}, ADDENDUM)
+    assert errors("LinkedList", {**good, "result": [{"type": "Thing"}]}, ADDENDUM)
 
 
 def test_tacc_tapis_entries_have_no_domain():
@@ -153,39 +188,42 @@ def test_unknown_providers_are_accepted():
 
 def test_data_version_is_etag_safe():
     def response(version):
-        return {"type": "ItemList", "status": "success", "message": "", "data_version": version, "result": []}
+        return {"status": "success", "message": "", "data_version": version, "result": []}
 
     assert not errors("InstitutionsResponse", response("2026-10-23.1"))
     for bad in ["a,b", 'a"b', "a b", "", "a" * 65]:
         assert errors("InstitutionsResponse", response(bad)), repr(bad)
 
 
-def test_etag_is_weak_and_names_the_context():
+def test_etag_is_weak():
     etag = jsonschema.Draft202012Validator(COMPONENTS["headers"]["ETag"]["schema"])
-    assert etag.is_valid(f'W/"2026-10-23.1;r{LATEST}"')
-    for bad in ['"2026-10-23.1;r1"', 'W/"2026-10-23.1"', 'W/"2026;r0"', 'W/"a,b;r1"', 'W/";r1"']:
+    for good in ['W/"2026-10-23.1"', f'W/"2026-10-23.1;r{LATEST}"']:
+        assert etag.is_valid(good), good
+    for bad in ['"2026-10-23.1"', 'W/""', 'W/"a b"', 'W/"a"b"', "W/2026"]:
         assert not etag.is_valid(bad), bad
 
 
 # Spec and context agree
 
 
-def test_every_mapped_field_has_the_same_term_in_the_context():
+def test_every_field_has_a_term_in_the_context():
     ctx = latest_context()
+    fields = set(SCHEMAS["InstitutionsResponse"]["properties"]) | set(SCHEMAS["Institution"]["properties"])
+    fields |= set(ADDENDUM["components"]["schemas"]["LinkedList"]["properties"])
+    for field in fields:
+        assert field in ctx, f"{field} must be mapped (or null) in the context"
+    for schema in ("LinkedList", "LinkedEntry"):
+        type_name = ADDENDUM["components"]["schemas"][schema]["properties"]["type"]["const"]
+        assert isinstance(ctx.get(type_name), str), f"{schema} type {type_name}"
 
-    def term(key):
-        value = ctx.get(key)
-        return value.get("@id") if isinstance(value, dict) else value
 
-    for schema in ("InstitutionsResponse", "Institution"):
-        for field, prop in SCHEMAS[schema]["properties"].items():
-            mapped = prop.get("x-schema-org") or resolve(prop).get("x-schema-org")
-            if mapped:
-                assert term(field) == mapped, f"{schema}.{field}"
-            else:
-                assert field in ctx and ctx[field] is None, f"{schema}.{field} must be null in the context"
-        type_name = SCHEMAS[schema]["properties"]["type"]["const"]
-        assert term(type_name) == SCHEMAS[schema]["x-schema-org"]["@type"], f"{schema} type"
+def test_the_context_maps_no_field_the_spec_lacks():
+    ctx = latest_context()
+    fields = set(SCHEMAS["InstitutionsResponse"]["properties"]) | set(SCHEMAS["Institution"]["properties"]) | {"type"}
+    types = {ADDENDUM["components"]["schemas"][s]["properties"]["type"]["const"] for s in ("LinkedList", "LinkedEntry")}
+    prefixes = {k for k, v in ctx.items() if isinstance(v, str) and v.endswith(("/", "#"))}
+    extra = set(ctx) - fields - types - prefixes - set(SCHEMAS["Provider"]["x-known-values"])
+    assert not extra, f"context terms for no field: {sorted(extra)}"
 
 
 def test_every_known_provider_is_mapped_in_the_context():
@@ -210,7 +248,7 @@ def test_context_files_are_exactly_the_revisions():
     assert files == sorted(context_file(r).name for r in REVISIONS)
 
 
-def test_spec_publishes_each_revisions_hash():
+def test_addendum_publishes_each_revisions_hash():
     published = CONTEXT_GET["x-context-sha256"]
     assert sorted(published) == sorted(REVISIONS)
     for revision in REVISIONS:
@@ -225,36 +263,71 @@ def test_context_example_is_the_latest_revision():
 
 
 def test_link_example_names_the_latest_revision():
-    base = SPEC["servers"][0]["variables"]["base_url"]["default"]
+    base = ADDENDUM["servers"][0]["variables"]["base_url"]["default"]
     expected = f"<{base}{CONTEXT.format(revision=LATEST)}>; {LINK_REL}"
-    assert COMPONENTS["headers"]["ContextLink"]["example"] == expected
+    assert ADDENDUM["components"]["headers"]["ContextLink"]["example"] == expected
 
 
-def test_spec_names_only_the_latest_revision():
+def test_addendum_names_only_the_latest_revision():
     context_prefix = CONTEXT.split("{")[0]
-    mentions = [int(m) for m in re.findall(re.escape(context_prefix) + r"(\d+)", SPEC_TEXT)]
-    mentions += [int(m) for m in re.findall(r';r(\d+)"', SPEC_TEXT)]
-    assert mentions, "the spec names the latest revision"
-    assert set(mentions) == {LATEST}, f"the spec names {sorted(set(mentions))}, not only the latest r{LATEST}"
+    mentions = [int(m) for m in re.findall(re.escape(context_prefix) + r"(\d+)", ADDENDUM_TEXT)]
+    assert mentions, "the addendum names the latest revision"
+    assert set(mentions) == {LATEST}, f"the addendum names {sorted(set(mentions))}, not only the latest r{LATEST}"
 
 
-# Headers
+# Both documents
 
 
-def test_allow_headers_name_the_paths_methods():
-    for path, header in [(LIST, "ListAllow"), (CONTEXT, "ContextAllow")]:
-        methods = {m.upper() for m in SPEC["paths"][path]}
-        allow = {m.strip() for m in COMPONENTS["headers"][header]["schema"]["const"].split(",")}
-        assert allow == methods, path
+def test_addendum_adds_to_the_core_list_and_nothing_else_there():
+    assert set(SPEC["paths"]) == {LIST}
+    assert set(ADDENDUM["paths"]) == {LIST, CONTEXT}
+    core, extra = SPEC["paths"][LIST], ADDENDUM["paths"][LIST]
+    assert set(extra["get"]["responses"]) == set(core["get"]["responses"]), "the addendum covers each core response"
+    assert extra["get"]["operationId"] == core["get"]["operationId"]
+
+
+def test_versions_match():
+    assert SPEC["info"]["version"] == ADDENDUM["info"]["version"]
 
 
 def test_every_response_forbids_sniffing():
-    for where, resp in all_responses():
-        headers = {name.lower(): resolve(h) for name, h in resp.get("headers", {}).items()}
+    for where, resp, doc in all_responses():
+        headers = {name.lower(): resolve(h, doc) for name, h in resolve(resp, doc).get("headers", {}).items()}
         assert headers.get("x-content-type-options") is COMPONENTS["headers"]["NoSniff"], where
 
 
 def test_problem_responses_are_never_stored():
-    for where, resp in all_responses():
+    for where, resp, doc in all_responses():
+        resp = resolve(resp, doc)
         if "application/problem+json" in resp.get("content", {}):
-            assert resolve(resp["headers"]["Cache-Control"]) is COMPONENTS["headers"]["ErrorCacheControl"], where
+            assert resolve(resp["headers"]["Cache-Control"], doc) is COMPONENTS["headers"]["ErrorCacheControl"], where
+
+
+# Header names whose values are comma-separated lists (RFC 9110 §5.6.1).
+LIST_HEADERS = {"cache-control", "vary", "allow", "access-control-allow-methods", "access-control-allow-headers", "access-control-expose-headers"}
+
+
+def all_headers():
+    """(where, name, header) for every response header either document defines, refs resolved."""
+    for where, resp, doc in all_responses():
+        for name, h in resolve(resp, doc).get("headers", {}).items():
+            yield f"{where} {name}", name.lower(), resolve(h, doc)
+
+
+def test_list_headers_name_members_not_an_exact_value():
+    checked = 0
+    for where, name, header in all_headers():
+        if name in LIST_HEADERS:
+            # A const would refuse the members a deployment may add.
+            assert "const" not in header["schema"], where
+            members = header["x-required-members"]
+            assert members and [m.strip() for m in header["example"].split(",")] == members, where
+            checked += 1
+    assert checked >= 10, f"list headers checked: {checked}"
+
+
+def test_extended_list_values_are_valid():
+    for where, name, header in all_headers():
+        if name in LIST_HEADERS:
+            extended = f"{header['example']}, x-deployment-extra"
+            assert jsonschema.Draft202012Validator(header["schema"]).is_valid(extended), where

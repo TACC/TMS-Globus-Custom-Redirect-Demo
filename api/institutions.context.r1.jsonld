@@ -17,7 +17,6 @@
     "provider": { "@id": "tms:provider", "@type": "@vocab" },
     "redirect_idp_domain": "tms:redirectIdpDomain",
     "idp_logout_url": { "@id": "tms:idpLogoutUrl", "@type": "@id" },
-    "approved": "tms:approved",
 
     "globus": "tms:GlobusProvider",
     "tacc_tapis": "tms:TaccTapisProvider"

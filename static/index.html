@@ -36,8 +36,8 @@
   </nav>
   <main class="content">
   <h1>Choose an institution and log in</h1>
-  <p class="note">The dropdown below comes from <code>GET /api/v1/institutions</code>, which serves the entries of
-  <code>mock/approved_institutions.json</code>; only those marked <em>approved</em> are offered.
+  <p class="note">The dropdown below comes from <code>GET /v1/tms/institutions</code>, which serves the entries of
+  <code>mock/approved_institutions.json</code> marked <em>approved</em>, and no others.
   Logging in sends you to Globus Auth with <code>redirect_idp_domain</code> set to the chosen
   institution's domain.</p>
   <div class="picker">
@@ -106,9 +106,10 @@
 
   const status = getJson('/login/status').catch(() => ({ logged_in: false }));
 
-  Promise.all([getJson('/api/v1/institutions'), status])
+  Promise.all([getJson('/v1/tms/institutions'), status])
     .then(([institutions, session]) => {
-      const approved = institutions.filter(inst => inst.approved);
+      // The list holds only approved entries.
+      const approved = institutions;
       const select = document.getElementById('institution');
       const btn = document.getElementById('login');
       const dry = document.getElementById('dry');

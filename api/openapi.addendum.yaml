@@ -1,0 +1,412 @@
+openapi: 3.1.0
+info:
+  title: Approved Institutions API, CORS and linked-data addendum
+  version: 0.9.0
+  summary: Optional additions to the core API, openapi.yaml.
+  description: |
+    Two optional additions to `openapi.yaml`, the core of the API. A
+    deployment may serve either, both, or neither:
+
+    - **CORS**: lets pages on other origins read the list. Only needed
+      when the list's clients are not on the deployment's own origin.
+    - **Linked data**: a JSON-LD view of the list. Each entry and the list
+      as a whole carry a `type`, the list's `Link` header names a JSON-LD
+      context, and the contexts are served at
+      `/v1/tms/contexts/institutions/{revision}`. `schema-org.md`, next to
+      this document, explains the choice of terms.
+
+    Where this document describes a response the core also describes, it
+    adds to it: its headers and schemas apply on top of the core's, and
+    what the core requires still holds. Everything the core says about
+    requests, header values and errors applies here too.
+
+    ### Header values
+    As in the core: a comma-separated list is a string whose
+    `x-required-members` it carries at least, in any order. Header names in
+    such a list are case-insensitive, and a deployment may add members (for
+    example `Vary: Accept-Encoding` when it compresses responses). `Link`
+    carries at least the link given; a deployment may add other links.
+  contact:
+    name: TACC
+    url: https://tacc.utexas.edu
+  license:
+    name: GNU General Public License v3.0 only
+    identifier: GPL-3.0-only
+
+servers:
+  - url: "{base_url}"
+    description: Any deployment of this API.
+    variables:
+      base_url:
+        default: https://tms.example.org
+        description: Base URL of the deployment, with no trailing slash.
+
+security:
+  - {}
+
+tags:
+  - name: institutions
+    description: Approved-institution list
+
+paths:
+  /v1/tms/institutions:
+    get:
+      tags: [institutions]
+      operationId: listInstitutions
+      summary: The list's CORS headers and linked-data view
+      description: |
+        **CORS.** Cross-origin reads are set per deployment by a list of
+        allowed origins (`scheme://host[:port]`), which is either empty,
+        specific origins, or `*` for any origin. Every response, including
+        `304` and errors, follows it:
+
+        - **Empty** (only clients on the same origin): no CORS headers.
+        - **Specific origins**: always `Vary: Origin`. When the request's
+          `Origin` exactly matches a listed origin, also
+          `Access-Control-Allow-Origin` set to that origin and
+          `Access-Control-Expose-Headers: ETag, Link, Retry-After`. Other
+          origins get no `Access-Control-*` headers.
+        - **`*`**: `Access-Control-Allow-Origin: *` and
+          `Access-Control-Expose-Headers: ETag, Link, Retry-After` on every
+          response.
+
+        The list is public, so credentials are never allowed
+        (`Access-Control-Allow-Credentials` is never sent). A cross-origin
+        `GET` that sets `If-None-Match` itself is preceded by a preflight,
+        which `OPTIONS` answers.
+
+        **Linked data.** The list and each entry carry a `type`, and a `200`
+        carries a `Link` to the latest context revision (a `304` does not).
+        The `ETag` then changes when either `data_version` or that revision
+        does, since a `304` would otherwise hide a moved `Link`.
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+      responses:
+        "200":
+          description: The core's `200`, with these headers and `type` fields.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Expose-Headers:
+              $ref: "#/components/headers/CorsExposeHeaders"
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
+            Link:
+              $ref: "#/components/headers/ContextLink"
+            X-Content-Type-Options:
+              $ref: "./openapi.yaml#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./openapi.yaml#/components/schemas/InstitutionsResponse"
+                  - $ref: "#/components/schemas/LinkedList"
+              examples:
+                approved:
+                  summary: An abridged list
+                  value:
+                    type: ItemList
+                    status: success
+                    message: Approved institutions.
+                    data_version: "2026-10-23.1"
+                    result:
+                      - type: Organization
+                        id: globus
+                        name: Globus (default login, no redirect)
+                        provider: globus
+                        redirect_idp_domain: null
+                        idp_logout_url: null
+                      - type: Organization
+                        id: uchicago
+                        name: University of Chicago
+                        provider: globus
+                        redirect_idp_domain: uchicago.edu
+                        idp_logout_url: https://uchicago.okta.com/login/signout
+                      - type: Organization
+                        id: tacc_tapis
+                        name: Tapis OAuth2 (TaccTapis)
+                        provider: tacc_tapis
+                        redirect_idp_domain: null
+                        idp_logout_url: null
+        "304":
+          $ref: "#/components/responses/ListCors"
+        "500":
+          $ref: "#/components/responses/ListCors"
+        "503":
+          $ref: "#/components/responses/ListCors"
+    options:
+      tags: [institutions]
+      operationId: preflightInstitutions
+      summary: CORS preflight for the institutions list
+      description: |
+        Answers the preflight a browser sends before a cross-origin `GET`
+        that sets `If-None-Match`, by the same list of allowed origins as
+        `GET`:
+
+        - **Empty**: no CORS headers, so the browser blocks the `GET`.
+        - **Specific origins**: always `Vary: Origin`. A listed `Origin` also
+          gets `Access-Control-Allow-Origin` set to that origin and the
+          `Access-Control-Allow-*` and `Access-Control-Max-Age` headers
+          below; other origins get no `Access-Control-*` headers.
+        - **`*`**: `Access-Control-Allow-Origin: *` and the headers below.
+
+        The server need not check `Access-Control-Request-Method` or
+        `Access-Control-Request-Headers`: the browser compares them against
+        what the response allows.
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - name: Access-Control-Request-Method
+          in: header
+          required: false
+          description: Method of the request being preflighted.
+          schema:
+            type: string
+          example: GET
+        - name: Access-Control-Request-Headers
+          in: header
+          required: false
+          description: Non-safelisted headers the request will set.
+          schema:
+            type: string
+          example: if-none-match
+      responses:
+        "204":
+          description: The preflight answer; no body.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/CorsAllowOrigin"
+            Access-Control-Allow-Methods:
+              description: |
+                Sent exactly when `Access-Control-Allow-Origin` is. Includes
+                at least `GET`.
+              schema:
+                type: string
+              example: GET
+              x-required-members: [GET]
+            Access-Control-Allow-Headers:
+              description: |
+                Sent exactly when `Access-Control-Allow-Origin` is. Includes
+                at least `If-None-Match`.
+              schema:
+                type: string
+              example: If-None-Match
+              x-required-members: [If-None-Match]
+            Access-Control-Max-Age:
+              description: |
+                Seconds the browser may reuse this answer, chosen by the
+                deployment (7200 is a good default). Sent exactly when
+                `Access-Control-Allow-Origin` is.
+              schema:
+                type: integer
+                minimum: 0
+              example: 7200
+            Vary:
+              $ref: "#/components/headers/VaryOrigin"
+            X-Content-Type-Options:
+              $ref: "./openapi.yaml#/components/headers/NoSniff"
+
+  /v1/tms/contexts/institutions/{revision}:
+    get:
+      tags: [institutions]
+      operationId: getInstitutionsContext
+      summary: A revision of the JSON-LD context for the institutions list
+      description: |
+        Maps the list's plain JSON fields to schema.org and `tms:` terms.
+        Public and open to any origin (`Access-Control-Allow-Origin: *`), so
+        JSON-LD processors on other sites can fetch it.
+
+        Contexts are revised separately from the API. Each revision is one
+        fixed document: a changed context (for example, mapping a field or
+        `provider` value a later version adds) is published as the next
+        revision, and the list's `Link` header moves to it. Earlier
+        revisions stay served unchanged for clients that cached a `Link` to
+        them. A revision's URL never changes content, so it may be cached
+        indefinitely, and it has no `ETag`: only `If-None-Match: *` matches.
+
+        Each revision is served byte for byte as the file
+        `institutions.context.r<n>.jsonld` next to this document, whose
+        SHA-256 `x-context-sha256` gives. The example below is the latest
+        revision.
+      x-context-sha256:
+        "1": b8c4082bcf683d07c26bac1369d75ca6cc24196f78282adaa55d0acf45636bbc
+      parameters:
+        - $ref: "#/components/parameters/Revision"
+        - $ref: "./openapi.yaml#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: The JSON-LD context document.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AnyOrigin"
+            Cache-Control:
+              $ref: "#/components/headers/ContextCacheControl"
+            X-Content-Type-Options:
+              $ref: "./openapi.yaml#/components/headers/NoSniff"
+          content:
+            application/ld+json:
+              schema:
+                type: object
+                required: ["@context"]
+                properties:
+                  "@context":
+                    type: object
+              examples:
+                latest:
+                  summary: Revision 1
+                  value:
+                    "@context":
+                      schema: https://schema.org/
+                      tms: https://tacc.utexas.edu/ns/tms#
+                      type: "@type"
+                      ItemList: schema:ItemList
+                      Organization: schema:Organization
+                      status: null
+                      message: null
+                      data_version: null
+                      result: schema:itemListElement
+                      id: schema:identifier
+                      name: schema:name
+                      provider:
+                        "@id": tms:provider
+                        "@type": "@vocab"
+                      redirect_idp_domain: tms:redirectIdpDomain
+                      idp_logout_url:
+                        "@id": tms:idpLogoutUrl
+                        "@type": "@id"
+                      globus: tms:GlobusProvider
+                      tacc_tapis: tms:TaccTapisProvider
+        "304":
+          description: |
+            `If-None-Match: *` matched. No body or `Content-Type`.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AnyOrigin"
+            Cache-Control:
+              $ref: "#/components/headers/ContextCacheControl"
+            X-Content-Type-Options:
+              $ref: "./openapi.yaml#/components/headers/NoSniff"
+        "404":
+          description: No such revision has been published.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AnyOrigin"
+            Cache-Control:
+              $ref: "./openapi.yaml#/components/headers/ErrorCacheControl"
+            X-Content-Type-Options:
+              $ref: "./openapi.yaml#/components/headers/NoSniff"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "./openapi.yaml#/components/schemas/Problem"
+              examples:
+                unknown:
+                  summary: An unpublished revision
+                  value:
+                    type: about:blank
+                    title: Not Found
+                    status: 404
+                    detail: No such resource.
+
+components:
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: false
+      description: Origin of the page making a cross-origin request.
+      schema:
+        type: string
+      example: https://portal.example.org
+    Revision:
+      name: revision
+      in: path
+      required: true
+      description: |
+        A published revision, in decimal without leading zeros. Any other
+        value gets `404`.
+      schema:
+        type: string
+        enum: ["1"]
+      example: "1"
+
+  headers:
+    ContextLink:
+      description: |
+        Points JSON-LD processors at the latest context, as an absolute URL:
+        `<{base_url}/v1/tms/contexts/institutions/1>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
+        The header may carry other links besides this one.
+      required: true
+      schema:
+        type: string
+      example: <https://tms.example.org/v1/tms/contexts/institutions/1>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+    CorsAllowOrigin:
+      description: |
+        The request's `Origin` when the deployment allows it, or `*` when it
+        allows any origin. Absent otherwise.
+      schema:
+        type: string
+      example: https://portal.example.org
+    CorsExposeHeaders:
+      description: |
+        Lets cross-origin scripts read the `ETag`, `Link` and `Retry-After`
+        headers. Sent exactly when `Access-Control-Allow-Origin` is.
+      schema:
+        type: string
+      example: ETag, Link, Retry-After
+      x-required-members: [ETag, Link, Retry-After]
+    VaryOrigin:
+      description: |
+        Names `Origin` when the deployment allows specific origins, since
+        the CORS headers then depend on the request's `Origin`. With the
+        other settings it need not name `Origin`, and it may be absent. It
+        may name other headers the deployment varies on.
+      schema:
+        type: string
+      example: Origin
+      x-required-members: [Origin]
+    AnyOrigin:
+      description: Any origin may read the response.
+      required: true
+      schema:
+        const: "*"
+    ContextCacheControl:
+      description: A revision never changes, so it may be kept indefinitely.
+      required: true
+      schema:
+        type: string
+      example: public, max-age=31536000, immutable
+      x-required-members: [public, max-age=31536000, immutable]
+
+  responses:
+    ListCors:
+      description: The core's response, with the list's CORS headers.
+      headers:
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/CorsAllowOrigin"
+        Access-Control-Expose-Headers:
+          $ref: "#/components/headers/CorsExposeHeaders"
+        Vary:
+          $ref: "#/components/headers/VaryOrigin"
+        X-Content-Type-Options:
+          $ref: "./openapi.yaml#/components/headers/NoSniff"
+
+  schemas:
+    LinkedList:
+      type: object
+      description: The `type` fields the linked-data view adds to the list.
+      required: [type, result]
+      properties:
+        type:
+          const: ItemList
+          description: JSON-LD type (aliased to `@type`), schema:ItemList.
+        result:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinkedEntry"
+    LinkedEntry:
+      type: object
+      required: [type]
+      properties:
+        type:
+          const: Organization
+          description: JSON-LD type (aliased to `@type`), schema:Organization.

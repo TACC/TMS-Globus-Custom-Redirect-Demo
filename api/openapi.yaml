@@ -1,96 +1,59 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API
-  version: 0.8.0
+  version: 0.9.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
-    Read-only endpoints: the list of approved institutions a user can sign
-    in through, with the IdP each one steers to, and the JSON-LD context
-    that maps that list to schema.org. The list also answers CORS preflight
-    requests.
+    One read-only endpoint: the list of approved institutions a user can
+    sign in through, with the IdP each one steers to.
 
-    The list comes in an envelope, `{ type, status, message, data_version, result }`.
+    The list comes in an envelope, `{ status, message, data_version, result }`.
     Its entries come from the deployment's institution data: every entry
     an operator has approved for sign-in, and no other.
 
+    This document is the core of the API, and all an implementation must
+    serve. `openapi.addendum.yaml`, next to it, is optional: cross-origin
+    reads (CORS) and a JSON-LD view of the list.
+
     ### Versions
     `v1` in the paths is the API's major version, which changes only with an
-    incompatible change. `info.version` versions this document and stays
-    below 1.0.0 until the v1 contract is frozen: until then a minor version
-    may still change it incompatibly. From 1.0.0 on, minor versions only add
-    to it.
+    incompatible change. The paths follow tms_server's layout, `/v1/tms/...`.
+    `info.version` versions this document and stays below 1.0.0 until the
+    v1 contract is frozen: until then a minor version may still change it
+    incompatibly. From 1.0.0 on, minor versions only add to it.
 
     ### Compatibility
     Later versions may add fields to any object, and values to `provider`
     (see `Provider`). Clients must ignore fields they do not recognise.
 
     ### Requests
-    - `HEAD` gets the same status and headers as `GET`, without a body.
     - Query parameters are ignored.
-    - `Accept` is ignored: the list is always `application/json` and a
-      context always `application/ld+json`, never `406`.
+    - `Accept` is ignored: the list is always `application/json`, never `406`.
+    - Generic HTTP behaviour (`HEAD`, `If-Match`, `405` for other methods)
+      follows RFC 9110 and is not restated here.
 
     ### Conditional requests
-    Preconditions are evaluated as RFC 9110 §13.2.2 orders them, `If-Match`
-    first, then `If-None-Match`, and only once the data can be read: when
-    it cannot, the error is sent whatever they say.
-
-    - Entity tags here are weak, so `If-Match`, which compares strongly,
-      succeeds only for `*` as the whole field. Any other value, a list
-      that includes `*` among other members too, gets
-      `412 Precondition Failed`.
-    - `If-None-Match` is `*`, or a comma-separated list of entity tags. `*`
-      matches whenever the resource can be served; it is valid only as the
-      whole field, so a list member `*` is not an entity tag. A tag matches
-      when it equals the response's `ETag` by weak comparison: the `W/`
-      prefix is ignored on both sides and the quoted parts are compared
-      byte for byte. Members that are not entity tags match nothing, and
-      the rest of the list still counts. A match gets `304 Not Modified`.
-    - The contexts have no `ETag`, so for them only `If-None-Match: *`
-      matches.
-    - There is no `Last-Modified` and no range support, so
-      `If-Modified-Since`, `If-Unmodified-Since` and `If-Range` are
-      ignored.
+    `If-None-Match` is `*`, or a comma-separated list of entity tags. `*`
+    matches whenever the list can be served; it is valid only as the whole
+    field. A tag matches when it equals the response's `ETag` by weak
+    comparison (RFC 9110 §8.8.3.2). A match gets `304 Not Modified`.
+    `If-None-Match` is evaluated only once the data can be read: when it
+    cannot, the error is sent whatever it says.
 
     ### Header values
-    Where a header's value is a comma-separated list, its members may come
-    in any order, and header names in it are case-insensitive. Where the
-    schema gives a `const` list:
-
-    - `Allow` carries exactly those members.
-    - `Vary` and the `Access-Control-*` lists carry at least those members;
-      a deployment may add others (for example `Vary: Accept-Encoding` when
-      it compresses responses).
-
-    A `Cache-Control` value gives directives the response carries; a
-    deployment may add others that do not contradict them. `Link` carries
-    at least the link the spec gives; a deployment may add other links.
+    A header whose value is a comma-separated list (`Cache-Control` here)
+    is given as a string, with `x-required-members` naming the members it
+    carries at least; they may come in any order, and a deployment may add
+    others that do not contradict them. Its `example` is the value without
+    additions. A header with a single exact value is given as a `const`.
     Responses may carry headers this document does not mention.
 
     Every response carries `X-Content-Type-Options: nosniff`.
 
-    ### Linked data
-    The payload stays plain JSON. Each schema and field names the
-    linked-data term it means with `x-schema-org`, and the JSON-LD context
-    holds the same mapping. `schema-org.md`, next to this document, explains
-    the choice of terms.
-
     ### Errors
     Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
     details (`application/problem+json`, the `Problem` schema), sent with
-    `Cache-Control: no-store`. Besides the errors each operation lists, a
-    method a path does not support gets `405 Method Not Allowed`, with an
-    `Allow` header naming the methods it does support:
-    `ListMethodNotAllowed` for `/api/v1/institutions` and
-    `ContextMethodNotAllowed` for a context. (OpenAPI has no place for a
-    method a path lacks, so these are components that no operation
-    references.)
-
-    Errors on `/api/v1/institutions` carry the list's CORS headers, like
-    every response there. Errors on a context path carry
-    `Access-Control-Allow-Origin: *`, like the contexts. This document
-    specifies only these paths; other paths, including
-    `/api/v1/institutions/` with a trailing slash, are outside it.
+    `Cache-Control: no-store`.
   contact:
     name: TACC
     url: https://tacc.utexas.edu
@@ -115,7 +78,7 @@ tags:
     description: Approved-institution list
 
 paths:
-  /api/v1/institutions:
+  /v1/tms/institutions:
     get:
       tags: [institutions]
       operationId: listInstitutions
@@ -127,40 +90,16 @@ paths:
         pending review) never appear in it.
 
         **Caching.** Clients revalidate on every use (`Cache-Control: no-cache`).
-        When the data has a `data_version`, the response's `ETag` is the weak
-        tag `W/"<data_version>;r<n>"`, where `n` is the context revision
-        `Link` names, so the tag changes when either the data or its context
-        does. It is weak because it names revisions, not the exact bytes: the
-        same data may be sent with other bytes (field order, white space, a
-        reworded `message`). See *Conditional requests* above for
-        `If-None-Match` and `If-Match`.
+        When the data has a `data_version`, the response has a weak `ETag`
+        that changes whenever `data_version` does. It is weak because it
+        names a revision of the data, not the exact bytes: the same data may
+        be sent with other bytes (field order, white space, a reworded
+        `message`). See *Conditional requests* above.
 
-        A `304` carries `Cache-Control`, `ETag`, `Vary` and the CORS headers,
-        as a `200` would, and no body, `Content-Type` or `Link`.
-
-        **CORS.** Cross-origin reads are set per deployment by a list of
-        allowed origins (`scheme://host[:port]`), which is either empty,
-        specific origins, or `*` for any origin. Every response, including
-        `304` and errors, follows it:
-
-        - **Empty** (only clients on the same origin): no CORS headers.
-        - **Specific origins**: always `Vary: Origin`. When the request's
-          `Origin` exactly matches a listed origin, also
-          `Access-Control-Allow-Origin` set to that origin and
-          `Access-Control-Expose-Headers: ETag, Link, Retry-After`. Other
-          origins get no `Access-Control-*` headers.
-        - **`*`**: `Access-Control-Allow-Origin: *` and
-          `Access-Control-Expose-Headers: ETag, Link, Retry-After` on every
-          response.
-
-        The list is public, so credentials are never allowed
-        (`Access-Control-Allow-Credentials` is never sent). A cross-origin
-        `GET` that sets `If-None-Match` itself is preceded by a preflight,
-        which `OPTIONS` answers.
+        A `304` carries `Cache-Control` and `ETag`, as a `200` would, and no
+        body or `Content-Type`.
       parameters:
         - $ref: "#/components/parameters/IfNoneMatch"
-        - $ref: "#/components/parameters/IfMatch"
-        - $ref: "#/components/parameters/Origin"
       responses:
         "200":
           description: The approved institutions.
@@ -169,14 +108,6 @@ paths:
               $ref: "#/components/headers/ListCacheControl"
             ETag:
               $ref: "#/components/headers/ETag"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            Link:
-              $ref: "#/components/headers/ContextLink"
             X-Content-Type-Options:
               $ref: "#/components/headers/NoSniff"
           content:
@@ -187,307 +118,34 @@ paths:
                 approved:
                   summary: An abridged list
                   value:
-                    type: ItemList
                     status: success
                     message: Approved institutions.
                     data_version: "2026-10-23.1"
                     result:
-                      - type: Organization
-                        id: globus
+                      - id: globus
                         name: Globus (default login, no redirect)
                         provider: globus
                         redirect_idp_domain: null
                         idp_logout_url: null
-                        approved: true
-                      - type: Organization
-                        id: uchicago
+                      - id: uchicago
                         name: University of Chicago
                         provider: globus
                         redirect_idp_domain: uchicago.edu
                         idp_logout_url: https://uchicago.okta.com/login/signout
-                        approved: true
-                      - type: Organization
-                        id: tacc_tapis
+                      - id: tacc_tapis
                         name: Tapis OAuth2 (TaccTapis)
                         provider: tacc_tapis
                         redirect_idp_domain: null
                         idp_logout_url: null
-                        approved: true
         "304":
           $ref: "#/components/responses/ListNotModified"
-        "412":
-          $ref: "#/components/responses/ListPreconditionFailed"
         "500":
           $ref: "#/components/responses/DataInvalid"
         "503":
           $ref: "#/components/responses/DataUnavailable"
-    head:
-      tags: [institutions]
-      operationId: headInstitutions
-      summary: The list's status and headers, without the body
-      description: As `GET`, without a body.
-      parameters:
-        - $ref: "#/components/parameters/IfNoneMatch"
-        - $ref: "#/components/parameters/IfMatch"
-        - $ref: "#/components/parameters/Origin"
-      responses:
-        "200":
-          description: The headers `GET` would send with the list.
-          headers:
-            Cache-Control:
-              $ref: "#/components/headers/ListCacheControl"
-            ETag:
-              $ref: "#/components/headers/ETag"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            Link:
-              $ref: "#/components/headers/ContextLink"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-        "304":
-          $ref: "#/components/responses/ListNotModified"
-        "412":
-          description: As for `GET`, without the body.
-          headers:
-            Cache-Control:
-              $ref: "#/components/headers/ErrorCacheControl"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-        "500":
-          description: As for `GET`, without the body.
-          headers:
-            Cache-Control:
-              $ref: "#/components/headers/ErrorCacheControl"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-        "503":
-          description: As for `GET`, without the body.
-          headers:
-            Retry-After:
-              $ref: "#/components/headers/RetryAfter"
-            Cache-Control:
-              $ref: "#/components/headers/ErrorCacheControl"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Expose-Headers:
-              $ref: "#/components/headers/CorsExposeHeaders"
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-    options:
-      tags: [institutions]
-      operationId: preflightInstitutions
-      summary: CORS preflight for the institutions list
-      description: |
-        Answers the preflight a browser sends before a cross-origin `GET`
-        that sets `If-None-Match`, by the same list of allowed origins as
-        `GET`:
-
-        - **Empty**: no CORS headers, so the browser blocks the `GET`.
-        - **Specific origins**: always `Vary: Origin`. A listed `Origin` also
-          gets `Access-Control-Allow-Origin` set to that origin and the
-          `Access-Control-Allow-*` and `Access-Control-Max-Age` headers
-          below; other origins get no `Access-Control-*` headers.
-        - **`*`**: `Access-Control-Allow-Origin: *` and the headers below.
-
-        The server need not check `Access-Control-Request-Method` or
-        `Access-Control-Request-Headers`: the browser compares them against
-        what the response allows.
-      parameters:
-        - $ref: "#/components/parameters/Origin"
-        - name: Access-Control-Request-Method
-          in: header
-          required: false
-          description: Method of the request being preflighted.
-          schema:
-            type: string
-          example: GET
-        - name: Access-Control-Request-Headers
-          in: header
-          required: false
-          description: Non-safelisted headers the request will set.
-          schema:
-            type: string
-          example: if-none-match
-      responses:
-        "204":
-          description: The preflight answer; no body.
-          headers:
-            Allow:
-              $ref: "#/components/headers/ListAllow"
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/CorsAllowOrigin"
-            Access-Control-Allow-Methods:
-              description: |
-                Sent exactly when `Access-Control-Allow-Origin` is. Includes
-                at least `GET`.
-              schema:
-                const: GET
-            Access-Control-Allow-Headers:
-              description: |
-                Sent exactly when `Access-Control-Allow-Origin` is. Includes
-                at least `If-None-Match`.
-              schema:
-                const: If-None-Match
-            Access-Control-Max-Age:
-              description: |
-                Seconds the browser may reuse this answer, chosen by the
-                deployment (7200 is a good default). Sent exactly when
-                `Access-Control-Allow-Origin` is.
-              schema:
-                type: integer
-                minimum: 0
-              example: 7200
-            Vary:
-              $ref: "#/components/headers/VaryOrigin"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-
-  /api/v1/contexts/institutions/{revision}:
-    get:
-      tags: [institutions]
-      operationId: getInstitutionsContext
-      summary: A revision of the JSON-LD context for the institutions list
-      description: |
-        Maps the list's plain JSON fields to schema.org and `tms:` terms.
-        Public and open to any origin (`Access-Control-Allow-Origin: *`), so
-        JSON-LD processors on other sites can fetch it.
-
-        Contexts are revised separately from the API. Each revision is one
-        fixed document: a changed context (for example, mapping a field or
-        `provider` value a later version adds) is published as the next
-        revision, and the list's `Link` header moves to it. Earlier
-        revisions stay served unchanged for clients that cached a `Link` to
-        them. A revision's URL never changes content, so it may be cached
-        indefinitely.
-
-        Each revision is served byte for byte as the file
-        `institutions.context.r<n>.jsonld` next to this document, whose
-        SHA-256 `x-context-sha256` gives. The example below is the latest
-        revision.
-      x-context-sha256:
-        "1": 1b28d7f4f5dd4091ecaf958823bf4bee451de99efefa72d45d97d277f986c279
-      parameters:
-        - $ref: "#/components/parameters/Revision"
-        - $ref: "#/components/parameters/IfNoneMatch"
-        - $ref: "#/components/parameters/IfMatch"
-      responses:
-        "200":
-          description: The JSON-LD context document.
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AnyOrigin"
-            Cache-Control:
-              $ref: "#/components/headers/ContextCacheControl"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-          content:
-            application/ld+json:
-              schema:
-                type: object
-                required: ["@context"]
-                properties:
-                  "@context":
-                    type: object
-              examples:
-                latest:
-                  summary: Revision 1
-                  value:
-                    "@context":
-                      schema: https://schema.org/
-                      tms: https://tacc.utexas.edu/ns/tms#
-                      type: "@type"
-                      ItemList: schema:ItemList
-                      Organization: schema:Organization
-                      status: null
-                      message: null
-                      data_version: null
-                      result: schema:itemListElement
-                      id: schema:identifier
-                      name: schema:name
-                      provider:
-                        "@id": tms:provider
-                        "@type": "@vocab"
-                      redirect_idp_domain: tms:redirectIdpDomain
-                      idp_logout_url:
-                        "@id": tms:idpLogoutUrl
-                        "@type": "@id"
-                      approved: tms:approved
-                      globus: tms:GlobusProvider
-                      tacc_tapis: tms:TaccTapisProvider
-        "304":
-          $ref: "#/components/responses/ContextNotModified"
-        "404":
-          $ref: "#/components/responses/NoSuchRevision"
-        "412":
-          $ref: "#/components/responses/ContextPreconditionFailed"
-    head:
-      tags: [institutions]
-      operationId: headInstitutionsContext
-      summary: A context revision's status and headers, without the body
-      description: As `GET`, without a body.
-      parameters:
-        - $ref: "#/components/parameters/Revision"
-        - $ref: "#/components/parameters/IfNoneMatch"
-        - $ref: "#/components/parameters/IfMatch"
-      responses:
-        "200":
-          description: The headers `GET` would send with the context.
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AnyOrigin"
-            Cache-Control:
-              $ref: "#/components/headers/ContextCacheControl"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-        "304":
-          $ref: "#/components/responses/ContextNotModified"
-        "404":
-          description: As for `GET`, without the body.
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AnyOrigin"
-            Cache-Control:
-              $ref: "#/components/headers/ErrorCacheControl"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
-        "412":
-          description: As for `GET`, without the body.
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AnyOrigin"
-            Cache-Control:
-              $ref: "#/components/headers/ErrorCacheControl"
-            X-Content-Type-Options:
-              $ref: "#/components/headers/NoSniff"
 
 components:
   parameters:
-    Origin:
-      name: Origin
-      in: header
-      required: false
-      description: Origin of the page making a cross-origin request.
-      schema:
-        type: string
-      example: https://portal.example.org
     IfNoneMatch:
       name: If-None-Match
       in: header
@@ -495,97 +153,32 @@ components:
       description: Entity tags from earlier responses, or `*`.
       schema:
         type: string
-      example: W/"2026-10-23.1;r1"
-    IfMatch:
-      name: If-Match
-      in: header
-      required: false
-      description: Succeeds only as `*`, the whole field; anything else gets `412`.
-      schema:
-        type: string
-      example: "*"
-    Revision:
-      name: revision
-      in: path
-      required: true
-      description: |
-        A published revision, in decimal without leading zeros. Any other
-        value gets `404`.
-      schema:
-        type: string
-        enum: ["1"]
-      example: "1"
+      example: W/"2026-10-23.1"
 
   headers:
     ListCacheControl:
       description: Clients must revalidate before reusing a stored copy.
       required: true
       schema:
-        const: no-cache
-    ContextCacheControl:
-      description: A revision never changes, so it may be kept indefinitely.
-      required: true
-      schema:
-        const: public, max-age=31536000, immutable
+        type: string
+      example: no-cache
+      x-required-members: [no-cache]
     ErrorCacheControl:
       description: Errors are never stored.
       required: true
       schema:
-        const: no-store
+        type: string
+      example: no-store
+      x-required-members: [no-store]
     ETag:
       description: |
-        The weak tag `W/"<data_version>;r<n>"`, `n` being the context
-        revision the list's `Link` names. Present exactly when the data has
-        a `data_version`.
+        A weak entity tag, present exactly when the data has a
+        `data_version`, and changed whenever `data_version` changes.
+        Otherwise opaque: clients must not parse it.
       schema:
         type: string
-        pattern: '^W/"[-!#-+.-~]{1,64};r[1-9][0-9]*"$'
-      example: W/"2026-10-23.1;r1"
-    ContextLink:
-      description: |
-        Points JSON-LD processors at the latest context, as an absolute URL:
-        `<{base_url}/api/v1/contexts/institutions/1>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"`.
-        The header may carry other links besides this one.
-      required: true
-      schema:
-        type: string
-      example: <https://tms.example.org/api/v1/contexts/institutions/1>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
-    CorsAllowOrigin:
-      description: |
-        The request's `Origin` when the deployment allows it, or `*` when it
-        allows any origin. Absent otherwise.
-      schema:
-        type: string
-      example: https://portal.example.org
-    CorsExposeHeaders:
-      description: |
-        Lets cross-origin scripts read the `ETag`, `Link` and `Retry-After`
-        headers. Sent exactly when `Access-Control-Allow-Origin` is.
-      schema:
-        const: ETag, Link, Retry-After
-    VaryOrigin:
-      description: |
-        Names `Origin` when the deployment allows specific origins, since
-        the CORS headers then depend on the request's `Origin`. With the
-        other settings it need not name `Origin`, and it may be absent. It
-        may name other headers the deployment varies on.
-      schema:
-        const: Origin
-    AnyOrigin:
-      description: Any origin may read the response.
-      required: true
-      schema:
-        const: "*"
-    ListAllow:
-      description: Methods the list supports.
-      required: true
-      schema:
-        const: GET, HEAD, OPTIONS
-    ContextAllow:
-      description: Methods a context supports.
-      required: true
-      schema:
-        const: GET, HEAD
+        pattern: '^W/"[!#-~]{1,128}"$'
+      example: W/"2026-10-23.1"
     RetryAfter:
       description: Seconds to wait before retrying. Optional.
       schema:
@@ -600,75 +193,14 @@ components:
   responses:
     ListNotModified:
       description: |
-        `If-None-Match` matched. No body, `Content-Type` or `Link`.
+        `If-None-Match` matched. No body or `Content-Type`.
       headers:
         Cache-Control:
           $ref: "#/components/headers/ListCacheControl"
         ETag:
           $ref: "#/components/headers/ETag"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/CorsAllowOrigin"
-        Access-Control-Expose-Headers:
-          $ref: "#/components/headers/CorsExposeHeaders"
-        Vary:
-          $ref: "#/components/headers/VaryOrigin"
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
-    ListPreconditionFailed:
-      description: |
-        `If-Match` was something other than `*`.
-      headers:
-        Cache-Control:
-          $ref: "#/components/headers/ErrorCacheControl"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/CorsAllowOrigin"
-        Access-Control-Expose-Headers:
-          $ref: "#/components/headers/CorsExposeHeaders"
-        Vary:
-          $ref: "#/components/headers/VaryOrigin"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          examples:
-            failed:
-              summary: A failed If-Match
-              value:
-                type: about:blank
-                title: Precondition Failed
-                status: 412
-                detail: If-Match did not match.
-    ListMethodNotAllowed:
-      description: |
-        A method `/api/v1/institutions` does not support. Carries the list's
-        CORS headers, like every response there.
-      headers:
-        Allow:
-          $ref: "#/components/headers/ListAllow"
-        Cache-Control:
-          $ref: "#/components/headers/ErrorCacheControl"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/CorsAllowOrigin"
-        Access-Control-Expose-Headers:
-          $ref: "#/components/headers/CorsExposeHeaders"
-        Vary:
-          $ref: "#/components/headers/VaryOrigin"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          examples:
-            rejected:
-              summary: A POST to the list
-              value:
-                type: about:blank
-                title: Method Not Allowed
-                status: 405
-                detail: POST is not supported here.
     DataInvalid:
       description: |
         The institution data was read but is invalid, so none of it is
@@ -676,12 +208,6 @@ components:
       headers:
         Cache-Control:
           $ref: "#/components/headers/ErrorCacheControl"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/CorsAllowOrigin"
-        Access-Control-Expose-Headers:
-          $ref: "#/components/headers/CorsExposeHeaders"
-        Vary:
-          $ref: "#/components/headers/VaryOrigin"
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
       content:
@@ -705,12 +231,6 @@ components:
           $ref: "#/components/headers/RetryAfter"
         Cache-Control:
           $ref: "#/components/headers/ErrorCacheControl"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/CorsAllowOrigin"
-        Access-Control-Expose-Headers:
-          $ref: "#/components/headers/CorsExposeHeaders"
-        Vary:
-          $ref: "#/components/headers/VaryOrigin"
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
       content:
@@ -725,84 +245,6 @@ components:
                 title: Service Unavailable
                 status: 503
                 detail: The institution data cannot be read right now.
-    ContextNotModified:
-      description: |
-        `If-None-Match: *` matched. No body or `Content-Type`.
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AnyOrigin"
-        Cache-Control:
-          $ref: "#/components/headers/ContextCacheControl"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-    NoSuchRevision:
-      description: No such revision has been published.
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AnyOrigin"
-        Cache-Control:
-          $ref: "#/components/headers/ErrorCacheControl"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          examples:
-            unknown:
-              summary: An unpublished revision
-              value:
-                type: about:blank
-                title: Not Found
-                status: 404
-                detail: No such resource.
-    ContextPreconditionFailed:
-      description: |
-        `If-Match` was something other than `*`.
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AnyOrigin"
-        Cache-Control:
-          $ref: "#/components/headers/ErrorCacheControl"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          examples:
-            failed:
-              summary: A failed If-Match
-              value:
-                type: about:blank
-                title: Precondition Failed
-                status: 412
-                detail: If-Match did not match.
-    ContextMethodNotAllowed:
-      description: |
-        A method a context does not support. Open to any origin, like the
-        contexts.
-      headers:
-        Allow:
-          $ref: "#/components/headers/ContextAllow"
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AnyOrigin"
-        Cache-Control:
-          $ref: "#/components/headers/ErrorCacheControl"
-        X-Content-Type-Options:
-          $ref: "#/components/headers/NoSniff"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          examples:
-            rejected:
-              summary: A POST to a context
-              value:
-                type: about:blank
-                title: Method Not Allowed
-                status: 405
-                detail: POST is not supported here.
 
   schemas:
     InstitutionsResponse:
@@ -810,14 +252,8 @@ components:
       description: |
         Envelope around the institution list. Clients must ignore fields
         they do not recognise.
-      x-schema-org:
-        "@type": schema:ItemList
-      required: [type, status, message, result]
+      required: [status, message, result]
       properties:
-        type:
-          const: ItemList
-          description: JSON-LD type (aliased to `@type`).
-          x-schema-org: "@type"
         status:
           const: success
         message:
@@ -829,10 +265,9 @@ components:
             Revision of the institution data (not of this API), so a client can
             tell when the list has changed. The server MUST give the data a
             new `data_version` whenever anything in `result` changes. Opaque;
-            it is also inside the response's `ETag`, so it is limited to
-            visible ASCII other than `"` (not allowed in an `ETag`) and `,`
-            (which separates tags in `If-None-Match`). Optional; readers must
-            not require it.
+            limited to visible ASCII other than `"` and `,`, so a server can
+            put it inside a quoted `ETag` that `If-None-Match` lists keep
+            whole. Optional; readers must not require it.
           minLength: 1
           maxLength: 64
           pattern: "^[-!#-+.-~]+$"
@@ -845,17 +280,14 @@ components:
             JSON Schema cannot.
           items:
             $ref: "#/components/schemas/Institution"
-          x-schema-org: schema:itemListElement
 
     Institution:
       type: object
-      x-schema-org:
-        "@type": schema:Organization
       description: |
         An organization users can sign in through. Responses always include
         every field, writing `null` where a field does not apply. Clients must
         ignore fields they do not recognise.
-      required: [type, id, name, provider, redirect_idp_domain, idp_logout_url, approved]
+      required: [id, name, provider, redirect_idp_domain, idp_logout_url]
       # A tacc_tapis entry never has an IdP domain.
       if:
         properties:
@@ -866,17 +298,12 @@ components:
           redirect_idp_domain:
             type: "null"
       properties:
-        type:
-          const: Organization
-          description: JSON-LD type (aliased to `@type`).
-          x-schema-org: "@type"
         id:
           type: string
           maxLength: 64
           pattern: "^[a-z0-9_]+$"
           description: Stable identifier of the entry, unique within the list.
           examples: [uchicago]
-          x-schema-org: schema:identifier
         name:
           type: string
           minLength: 1
@@ -885,7 +312,6 @@ components:
           pattern: '\S'
           description: Display name.
           examples: [University of Chicago]
-          x-schema-org: schema:name
         provider:
           $ref: "#/components/schemas/Provider"
         redirect_idp_domain:
@@ -901,7 +327,6 @@ components:
             `null` when the entry has no IdP to steer to, and always `null`
             when `provider` is `tacc_tapis`.
           examples: [uchicago.edu]
-          x-schema-org: tms:redirectIdpDomain
         idp_logout_url:
           type: [string, "null"]
           format: uri
@@ -912,13 +337,6 @@ components:
             Sign-out URL of the institution's own IdP, always `https`, or
             `null` when there is none.
           examples: [https://uchicago.okta.com/login/signout]
-          x-schema-org: tms:idpLogoutUrl
-        approved:
-          const: true
-          description: |
-            Whether login may proceed for this institution. Always `true`,
-            since the listing leaves unapproved entries out.
-          x-schema-org: tms:approved
 
     Provider:
       type: string
@@ -926,16 +344,14 @@ components:
       maxLength: 64
       description: |
         Login flow for the entry. An open set of values: this version sends
-        the known values below, and a later minor version may add one,
-        together with a context revision that maps it. Clients must not
-        reject a response for an unknown value; they skip the entries whose
-        provider they do not support.
+        the known values below, and a later minor version may add one.
+        Clients must not reject a response for an unknown value; they skip
+        the entries whose provider they do not support.
 
         - `globus`: Globus Auth, optionally steered by `redirect_idp_domain`.
         - `tacc_tapis`: Tapis OAuth2, without Globus.
       x-known-values: [globus, tacc_tapis]
       examples: [globus, tacc_tapis]
-      x-schema-org: tms:provider
 
     Problem:
       type: object

@@ -1,16 +1,13 @@
 # This file instructs Redocly's linter to ignore the rules contained for specific parts of your API.
 # See https://redocly.com/docs/cli/ for more information.
 #
-# operation-4xx-response stays on for every other operation. The list's
-# preflight (OPTIONS) takes no input a client can get wrong, so it has no
-# 4xx; the 405 for other methods is a component (see below).
-#
-# no-unused-components: the 405 responses describe methods a path lacks,
-# which OpenAPI has no place for, so no operation references them;
-# info.description and the conformance suite do.
+# operation-4xx-response stays on for the context path, whose revision a
+# client can get wrong (404). The list takes no input a client can get
+# wrong, so neither its GET nor its preflight has a 4xx.
 api/openapi.yaml:
   operation-4xx-response:
-    - '#/paths/~1api~1v1~1institutions/options/responses'
-  no-unused-components:
-    - '#/components/responses/ListMethodNotAllowed'
-    - '#/components/responses/ContextMethodNotAllowed'
+    - '#/paths/~1v1~1tms~1institutions/get/responses'
+api/openapi.addendum.yaml:
+  operation-4xx-response:
+    - '#/paths/~1v1~1tms~1institutions/get/responses'
+    - '#/paths/~1v1~1tms~1institutions/options/responses'

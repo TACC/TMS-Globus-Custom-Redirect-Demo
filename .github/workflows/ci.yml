@@ -11,7 +11,7 @@ permissions:
 # Actions are pinned to commit SHAs (tag in the comment); update both together.
 jobs:
   # Unit tests plus the demo's API contract tests (src/institutions_api.rs),
-  # which check its responses against api/openapi.yaml.
+  # which check its responses against api/openapi.yaml and its addendum.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
 
-  # The spec itself, with no implementation: valid OpenAPI, examples that
+  # The spec and addendum, with no implementation: valid OpenAPI, examples that
   # match their schemas, spec and context in agreement with consistent
   # revision bookkeeping, and an example response that the JSON-LD context
   # turns into the promised RDF.

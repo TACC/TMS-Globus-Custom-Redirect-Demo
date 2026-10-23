@@ -1,10 +1,12 @@
-# Lint config for api/openapi.yaml: `npx @redocly/cli@2.60.0 lint`
+# Lint config for the spec and its addendum: `npx @redocly/cli@2.60.0 lint`
 extends:
   - recommended
 
 apis:
   institutions:
     root: api/openapi.yaml
+  institutions-addendum:
+    root: api/openapi.addendum.yaml
 
 rules:
   # Objects are open (clients must ignore unknown fields), so examples are

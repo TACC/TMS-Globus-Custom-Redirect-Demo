@@ -1,12 +1,13 @@
 # schema.org mapping of the institutions list
 
-Background for `openapi.yaml` and the JSON-LD contexts
-(`institutions.context.r<n>.jsonld`). None of it is needed to produce the
-list; it explains why the fields map to the terms they do.
+Background for the linked-data part of `openapi.addendum.yaml` and the
+JSON-LD contexts (`institutions.context.r<n>.jsonld`). None of it is needed
+to produce the list; it explains why the fields map to the terms they do.
 
-The payload stays plain, flat JSON. Each schema and field in the spec names
-the linked-data term it means with `x-schema-org`, and the latest context
-holds the same mapping (`scripts/check_spec.py` checks this).
+The payload stays plain, flat JSON. The latest context is the mapping: it
+gives every field of the spec's schemas a term, or `null` to leave it out
+of the graph, and maps no field the spec lacks (`scripts/check_spec.py`
+checks this).
 
 - The response is a [schema:ItemList](https://schema.org/ItemList) and each
   entry a [schema:Organization](https://schema.org/Organization). The `type`
@@ -14,8 +15,8 @@ holds the same mapping (`scripts/check_spec.py` checks this).
   own.
 - The list links each entry directly with `schema:itemListElement`. The
   order of `result` is part of the JSON only; the graph does not record it.
-- Fields with no schema.org term (IdP domain, IdP sign-out URL, approval,
-  login provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
+- Fields with no schema.org term (IdP domain, IdP sign-out URL, login
+  provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
   That namespace is not published yet, so its IRIs do not resolve.
 - The envelope fields `status`, `message` and `data_version` describe the HTTP
   response, not the institutions, so the context leaves them out of the
@@ -38,7 +39,6 @@ rather than map a field:
 |---|---|
 | `provider` | `schema:AuthenticateAction` (pending, issue 4507), `schema:provider` |
 | `redirect_idp_domain` | `schema:AuthenticateAction`: signing in to the institution's IdP |
-| `approved` | `schema:Certification` / `schema:certificationStatus` (core): a Certification with status `CertificationActive` or `CertificationInactive` |
 
 schema.org, pending included, has no term for an IdP domain or a sign-out
 URL, so those stay in `tms:`.

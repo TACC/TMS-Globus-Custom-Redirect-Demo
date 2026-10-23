@@ -3,8 +3,9 @@
 //! In production this list would come from TMS (e.g. a table next to
 //! `identity_providers` / `allowed_redirects`) or an admin API. Here it is
 //! read from a mocked registry file, `{ "data_version", "institutions": [...] }`,
-//! holding approved and unapproved entries alike. `institutions_api` serves the
-//! approved ones in the shape api/openapi.yaml defines.
+//! holding approved and unapproved entries alike. This is the stored model;
+//! `institutions_api` has the API's own model, and serves the approved
+//! entries in the shape api/openapi.yaml defines.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,26 +22,10 @@ pub enum Provider {
     TaccTapis,
 }
 
-/// JSON-LD type of an entry (`type`, aliased to `@type` by the JSON-LD
-/// context, api/institutions.context.r<n>.jsonld). Written out, never read from the registry.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub enum InstitutionType {
-    #[default]
-    Organization,
-}
-
-/// JSON-LD type of the list as a whole.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub enum ListType {
-    #[default]
-    ItemList,
-}
-
+/// One registry entry, approved or not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Institution {
-    #[serde(rename = "type", skip_deserializing)]
-    pub kind: InstitutionType,
     /// Stable id used by the UI (`/login?institution=<id>`).
     pub id: String,
     pub name: String,
@@ -128,8 +113,9 @@ impl Registry {
         self.data_version.as_deref()
     }
 
-    pub fn approved(&self) -> Vec<Institution> {
-        self.institutions.iter().filter(|i| i.approved).cloned().collect()
+    /// The approved entries, in the registry's order.
+    pub fn approved(&self) -> impl Iterator<Item = &Institution> {
+        self.institutions.iter().filter(|i| i.approved)
     }
 
     /// Lookup by id, approved or not: unapproved institutions can sign in, and
@@ -284,7 +270,7 @@ mod tests {
     #[test]
     fn lookup_covers_all_known_institutions_only() {
         let reg = Registry::from_json(MOCK).unwrap();
-        assert!(reg.approved().iter().all(|i| i.approved));
+        assert!(reg.approved().all(|i| i.approved));
         assert!(!reg.find("example").unwrap().approved);
         assert!(reg.find("uchicago").unwrap().approved);
         assert!(reg.find("nope").is_none());
@@ -312,11 +298,9 @@ mod tests {
         assert!(identity_matches(tapis, "jdoe@tacc"));
     }
 
+    /// `type` belongs to the API's linked-data view, not to the registry.
     #[test]
-    fn json_ld_type_is_written_but_not_read() {
-        let reg = Registry::from_json(MOCK).unwrap();
-        let out = serde_json::to_value(reg.find("uchicago").unwrap()).unwrap();
-        assert_eq!(out["type"], "Organization");
+    fn json_ld_type_is_not_a_registry_field() {
         assert!(with("type", "Organization".into()).is_err());
     }
 

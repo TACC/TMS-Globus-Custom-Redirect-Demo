@@ -19,6 +19,8 @@ rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.8"
 sha2 = "0.10"
 tower-http = { version = "0.7.1", features = ["fs"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 
 # RSA key generation is very slow unoptimized; keep debug builds usable.
 [profile.dev.package.num-bigint-dig]
