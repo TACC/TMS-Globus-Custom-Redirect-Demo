@@ -27,7 +27,7 @@
     <nav class="navbar">
         <div class="nav-left">
             <a class="nav-btn" href="/">Home</a>
-            <a class="nav-btn" href="/demo">Institutions</a>
+            <a class="nav-btn">About</a>
         </div>
         <a class="auth-btn" id="login-btn" href="/demo">Log in</a>
         <!-- /logout is a POST: it revokes the token, then sends you through Globus sign-out back here. -->
@@ -39,12 +39,15 @@
     <div class="main">
         <h1>Globus Institution Login Demo</h1>
         <div id="authenticated" hidden>
-            <p>Logged in via <b id="institution"></b> (<span id="provider"></span>).</p>
+            <p>Logged in as: <span id="user"></span></p>
+            <p>Institution: <b id="institution"></b></p>
+            <!-- Hidden for now; remove this comment wrapper to bring the TMS link back.
             <p class="tms-link">
                 <a class="tms-btn"
                     href="https://tms-auth-service.tacc.cloud/login?idp_id=globus_idp&redirect_uri=https://tms-auth-service.tacc.cloud/">Link
                     Resources via TMS</a>
             </p>
+            -->
         </div>
         <div id="anonymous">
             <p>You are not authenticated.</p>
@@ -62,12 +65,25 @@
             .then(r => r.json())
             .then(({ result }) => {
                 if (!result?.logged_in) return;
+                const u = result.user;
+                const details = [u.identity_provider_display_name, u.preferred_username].filter(Boolean).join(', ');
+                document.getElementById('user').textContent = `${u.name ?? u.preferred_username} (${details})`;
                 document.getElementById('institution').textContent = result.institution;
-                document.getElementById('provider').textContent = result.provider;
                 document.getElementById('authenticated').hidden = false;
                 document.getElementById('anonymous').hidden = true;
-                document.getElementById('logout-form').hidden = false;
+                const form = document.getElementById('logout-form');
+                form.hidden = false;
                 document.getElementById('login-btn').hidden = true;
+                // Globus's sign-out page (and the IdP sign-out it continues to)
+                // never returns by itself, so it gets its own tab while this one
+                // revokes the token and comes back here. Without JS the form's
+                // plain POST /logout still signs out in this tab.
+                form.addEventListener('submit', e => {
+                    e.preventDefault();
+                    if (result.logout_url) window.open(result.logout_url, '_blank', 'noopener');
+                    fetch('/logout?local=true', { method: 'POST' })
+                        .finally(() => location.assign('/'));
+                });
             })
             .catch(() => {}); // stay on the logged-out view
     </script>

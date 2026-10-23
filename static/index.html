@@ -3,18 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Institution Login Demo</title>
+<title>Login Demo</title>
+<!-- Shared with the landing page: the navbar and its buttons, and the font. -->
+<link rel="stylesheet" href="/static/app.css">
 <style>
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1d2330; }
+  body { font-size: 16px; line-height: 1.5; color: #1d2330; }
+  .content { max-width: 60rem; margin: 1.5rem auto; padding: 0 .75rem; }
   .picker { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; margin: 1.2rem 0; }
   .picker select { font: inherit; flex: 1 1 18rem; min-width: 0; padding: .35rem .5rem; }
   code { background: #f2f3f5; padding: .1rem .3rem; border-radius: 3px; }
   .note { color: #5b6475; }
+  .footnote { font-style: italic; }
   a.btn { background: #1f5fbf; color: #fff; padding: .35rem .9rem; border-radius: 4px; text-decoration: none; }
-  a.btn.home { position: absolute; top: 1rem; right: 1rem; }
-  h1 { margin-right: 10rem; } /* keep the heading clear of the Back to Home button on narrow screens */
   a.btn.signout { background: #c62828; }
-  a.dry { margin-left: .6rem; font-size: .9rem; }
+  /* The gold of the landing page's banner; dark text keeps it readable. */
+  a.btn.dry { background: #e8a820; color: #1d2330; font-style: normal; display: inline-block; margin-right: .3rem; }
   dialog { width: min(40rem, calc(100vw - 2rem)); border: 1px solid #ccd; border-radius: 6px; padding: 1.2rem; }
   dialog::backdrop { background: rgba(20, 25, 35, .45); }
   dialog h2 { margin: 0 0 .6rem; font-size: 1.1rem; }
@@ -26,17 +29,22 @@
 </style>
 </head>
 <body>
-  <a class="btn home" href="/">&larr; Back to Home</a>
-  <h1>Log in with your institution</h1>
+  <nav class="navbar">
+    <div class="nav-left">
+      <a class="nav-btn" href="/">Home</a>
+    </div>
+  </nav>
+  <main class="content">
+  <h1>Choose an institution and log in</h1>
   <p class="note">The dropdown below comes from <code>GET /login/institutions</code>, which serves the entries of
   <code>mock/approved_institutions.json</code>; only those marked <em>approved</em> are offered.
   Logging in sends you to Globus Auth with <code>redirect_idp_domain</code> set to the chosen
   institution's domain.</p>
   <div class="picker">
     <select id="institution" aria-label="Institution" disabled><option>Loading…</option></select>
-    <span><a class="btn" id="login" href="#">Log in</a><a class="dry" id="dry" href="#">see URL</a></span>
+    <a class="btn" id="login" href="#">Log in</a>
   </div>
-  <p class="note">"see URL" calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.</p>
+  <p class="note footnote"><a class="btn dry" id="dry" href="#">Preview URL</a> (calls <code>/login?…&amp;dry_run=true</code> and shows the authorize URL without redirecting.)</p>
   <dialog id="url-dialog" aria-labelledby="url-title">
     <h2 id="url-title"></h2>
     <p id="url-blocked"></p>
@@ -44,6 +52,7 @@
     <p class="note" id="url-mode"></p>
     <form method="dialog" class="actions"><button>Close</button></form>
   </dialog>
+  </main>
 <script>
   const dialog = document.getElementById('url-dialog');
   // Click on the backdrop (outside the dialog box) closes it, as Esc and Close do.

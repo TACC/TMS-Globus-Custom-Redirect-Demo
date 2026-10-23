@@ -509,7 +509,7 @@ fn shell(title: &str, body: &str) -> String {
         r#"<!doctype html><html><head><meta charset="utf-8"><title>{}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- body{{font:16px/1.5 system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;color:#1d2330}}
+ body{{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:1.5rem auto;padding:0 .75rem;color:#1d2330}}
  h1{{color:#bf5700}} table{{border-collapse:collapse;margin:1rem 0}}
  th,td{{text-align:left;padding:.3rem .8rem;border-bottom:1px solid #ddd}}
  code{{background:#f2f3f5;padding:.1rem .3rem;border-radius:3px;word-break:break-all}}
