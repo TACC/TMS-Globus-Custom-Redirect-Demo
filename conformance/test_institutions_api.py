@@ -24,7 +24,6 @@ server's own tests.
 """
 
 import hashlib
-import http
 import http.client
 import json
 import os
@@ -210,15 +209,15 @@ def assert_list_cors(resp, origin):
         assert not [n for n in resp.headers if n.startswith("access-control-")]
 
 
-def assert_problem(resp, status):
+def assert_error(resp, status):
+    """An HttpResult error, as the spec gives it, with the given status."""
     assert resp.status == status
-    assert resp.media_type() == "application/problem+json"
+    assert resp.media_type() == "application/json"
     assert resp.header("x-content-type-options") == NO_SNIFF
     assert_cache_control(resp, header_required("ErrorCacheControl"))
     body = resp.json()
-    assert_valid("Problem", body)
-    assert body["status"] == status
-    assert body["title"] == http.HTTPStatus(status).phrase, "title is the status phrase"
+    assert_valid("HttpResult", body)
+    assert body["result_code"] == str(status), "result_code is the status"
 
 
 @pytest.fixture(scope="module")
@@ -236,8 +235,9 @@ def test_list_conforms(listing):
     assert_cache_control(listing, header_required("ListCacheControl"))
     body = listing.json()
     assert_valid("InstitutionsResponse", body)
-    ids = [i["id"] for i in body["result"]]
+    ids = [i["id"] for i in body["institutions"]]
     assert len(ids) == len(set(ids)), "each id at most once"
+    assert body["num_institutions"] == len(ids)
     if "data_version" in body:
         assert jsonschema.Draft202012Validator(SPEC["components"]["headers"]["ETag"]["schema"]).is_valid(listing.header("etag"))
     else:
@@ -245,7 +245,7 @@ def test_list_conforms(listing):
 
 
 def test_order_is_stable(listing):
-    assert call("GET", LIST).json()["result"] == listing.json()["result"]
+    assert call("GET", LIST).json()["institutions"] == listing.json()["institutions"]
 
 
 def test_query_and_accept_are_ignored(listing):
@@ -253,7 +253,7 @@ def test_query_and_accept_are_ignored(listing):
         resp = call("GET", path, headers)
         assert resp.status == 200, path
         assert resp.media_type() == "application/json"
-        assert resp.json()["result"] == listing.json()["result"]
+        assert resp.json()["institutions"] == listing.json()["institutions"]
 
 
 def matching_tags(etag):
@@ -372,5 +372,5 @@ def test_context_conditional_requests(revision):
 @pytest.mark.parametrize("revision", ["0", "01", "+1", f"r{LATEST}", str(LATEST + 1)])
 def test_unpublished_revisions_are_not_found(revision):
     resp = call("GET", context_path(revision))
-    assert_problem(resp, 404)
+    assert_error(resp, 404)
     assert resp.header("access-control-allow-origin") == addendum_const("AnyOrigin")

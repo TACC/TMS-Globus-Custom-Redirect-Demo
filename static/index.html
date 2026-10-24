@@ -84,6 +84,8 @@
   }
 
   const getJson = url => fetch(url).then(r => r.json()).then(body => body.result);
+  // The institutions list comes in tms_server's envelope.
+  const getInstitutions = () => fetch('/v1/tms/institutions').then(r => r.json()).then(body => body.institutions);
 
   const domainLabel = inst => inst.redirect_idp_domain
     ?? (inst.provider === 'tacc_tapis' ? 'Tapis OAuth2' : 'no redirect_idp_domain');
@@ -106,7 +108,7 @@
 
   const status = getJson('/login/status').catch(() => ({ logged_in: false }));
 
-  Promise.all([getJson('/v1/tms/institutions'), status])
+  Promise.all([getInstitutions(), status])
     .then(([institutions, session]) => {
       // The list holds only approved entries.
       const approved = institutions;

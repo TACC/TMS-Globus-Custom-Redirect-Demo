@@ -28,6 +28,8 @@ from pyld import jsonld
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 LIST = "/v1/tms/institutions"
+# The envelope field that holds the entries.
+ENTRIES = "institutions"
 CONTEXT_REL = "http://www.w3.org/ns/json-ld#context"
 EXTRA_HEADERS = json.loads(os.environ.get("API_EXTRA_HEADERS") or "{}")
 
@@ -56,8 +58,8 @@ class Mapping:
             prefix, _, local = term.partition(":")
             return prefixes[prefix] + local if prefix in prefixes else term
 
-        def mapped(schema):
-            for field in schemas[schema]["properties"]:
+        def mapped(fields):
+            for field in fields:
                 value = ctx.get(field)
                 definition = value if isinstance(value, dict) else {"@id": value}
                 if definition["@id"]:
@@ -65,9 +67,11 @@ class Mapping:
 
         self.list_type = expand(ctx[linked["LinkedList"]["properties"]["type"]["const"]])
         self.entry_type = expand(ctx[linked["LinkedEntry"]["properties"]["type"]["const"]])
-        # The list's own predicates (result) and each entry's.
-        self.list_fields = list(mapped("InstitutionsResponse"))
-        self.entry_fields = list(mapped("Institution"))
+        # The list's own predicates (institutions, num_institutions) and each entry's.
+        # Only the envelope fields the addendum's LinkedList names are in the
+        # graph; the rest must be left out, and a mapped one shows as a leak.
+        self.list_fields = list(mapped(set(linked["LinkedList"]["properties"]) - {"type"}))
+        self.entry_fields = list(mapped(schemas["Institution"]["properties"]))
         self.predicates = {RDF_TYPE} | {p for _, p, _ in self.list_fields + self.entry_fields}
         # Vocabulary terms (provider values) the context maps.
         self.vocab = {k: expand(v) for k, v in ctx.items() if isinstance(v, str) and ":" in v and k not in prefixes}
@@ -77,7 +81,7 @@ def check(name, response, context, mapping):
     """The ways `response` read with `context` falls short, as messages."""
     failures = []
     triples = jsonld.to_rdf({**context, **response})["@default"]
-    entries = response["result"]
+    entries = response[ENTRIES]
 
     def objects(predicate):
         return [t["object"] for t in triples if t["predicate"]["value"] == predicate]
@@ -91,7 +95,11 @@ def check(name, response, context, mapping):
     expect(types.count(mapping.entry_type) == len(entries), f"every entry a {mapping.entry_type}")
     orgs = {t["subject"]["value"] for t in triples if t["object"]["value"] == mapping.entry_type}
     for field, predicate, _ in mapping.list_fields:
-        expect({o["value"] for o in objects(predicate)} == orgs, f"every entry linked directly by {field} ({predicate})")
+        if field == ENTRIES:
+            expect({o["value"] for o in objects(predicate)} == orgs, f"every entry linked directly by {field} ({predicate})")
+        else:
+            # A literal of the list itself, such as its number of items.
+            expect([o["value"] for o in objects(predicate)] == [str(response[field])], f"{field} as {predicate}")
 
     # Each mapped field counted against the entries, so an unmapped value
     # cannot pass by producing no triples.

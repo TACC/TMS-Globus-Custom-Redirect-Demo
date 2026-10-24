@@ -16,9 +16,9 @@ addition being `redirect_idp_domain`.
 ## What it shows
 
 1. `GET /v1/tms/institutions` serves the approved entries of the registry
-   file `mock/approved_institutions.json` (`{ data_version, institutions }`) in a
-   Tapis-style envelope, `status / message / data_version / result`, as
-   specified in `api/openapi.yaml`. The demo also serves the optional
+   file `mock/approved_institutions.json` (`{ data_version, institutions }`) in
+   tms_server's response envelope, `result_code / result_msg / data_version /
+   num_institutions / institutions`, as specified in `api/openapi.yaml`. The demo also serves the optional
    addendum, `api/openapi.addendum.yaml`: CORS for other origins, and a
    JSON-LD view of the list (`type` fields, a `Link` header and the
    contexts). The registry is checked against the
@@ -26,8 +26,8 @@ addition being `redirect_idp_domain`.
    sign-out URLs, no domain for Tapis), so a bad entry stops the server
    instead of being served. Each request reads the file again, so edits
    take effect without a restart; if it has gone missing the list answers
-   503, and if it no longer passes the checks, 500 (RFC 9457 problem
-   details, as the spec gives them). The list is public, so
+   503, and if it no longer passes the checks, 500 (tms_server's
+   `HttpResult` errors, as the spec gives them). The list is public, so
    `approved: false` entries are left out of it, and the list has no
    `approved` field: the registry's entries (`src/institutions.rs`) and
    the API's (`src/institutions_api.rs`) are separate models, as
@@ -62,7 +62,9 @@ being redirected. For an unapproved institution it answers 403 with the
 blocked message, `"blocked": true`, and the authorize URL it would have used
 if approved (shown under the message in the "Preview URL" popup).
 
-Two entries in the mock list are not institution redirects:
+Two entries in the mock list are not institution redirects. Both belong in
+the served list: the spec counts them as sign-in options alongside the
+institutions.
 
 - **Globus (default login, no redirect)** (`id: globus`, `redirect_idp_domain: null`)
   sends the authorize request without `redirect_idp_domain`, so you see
@@ -326,7 +328,9 @@ CI (`.github/workflows/ci.yml`) runs all of them.
 
 `api/openapi.yaml` is the core of the API, all an implementation must
 serve: the list's `GET` with `200`, `304` (`If-None-Match` against a weak,
-opaque `ETag`), `500` and `503`. `api/openapi.addendum.yaml` is optional
+opaque `ETag`), `500` and `503`, in tms_server's formats (the success
+envelope `{result_code: "0", result_msg, num_institutions, institutions}`,
+and `HttpResult` errors). `api/openapi.addendum.yaml` is optional
 and adds to it: the list's CORS headers and `OPTIONS` preflight, and the
 linked-data view (`type` fields, `Link`, and the contexts at
 `/v1/tms/contexts/institutions/<n>`). Generic HTTP behaviour (`HEAD`,
@@ -352,8 +356,8 @@ in-process and validate the responses against the schemas in
 `ETag` `W/"<data_version>;r<n>"`, `If-None-Match` parsed by the RFC 9110
 grammar and `If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS`
 preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the
-context, `X-Content-Type-Options: nosniff` everywhere), the RFC 9457 errors
-(404 for an unpublished revision, 405, 412, and 500/503 from a broken or
+context, `X-Content-Type-Options: nosniff` everywhere), the `HttpResult`
+errors (404 for an unpublished revision, 405, 412, and 500/503 from a broken or
 missing registry file), and that the served contexts and providers are the
 ones the documents publish. `HEAD`, `If-Match` (412) and 405 are checked
 against RFC 9110 rather than the spec.

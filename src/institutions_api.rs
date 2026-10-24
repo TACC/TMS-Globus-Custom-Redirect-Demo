@@ -7,7 +7,7 @@
 //!
 //! Every response carries `X-Content-Type-Options: nosniff`. Beyond the
 //! spec, it follows RFC 9110 for HEAD, If-Match (412) and other methods
-//! (405), as RFC 9457 problems. Kept apart from the demo's login flow so it
+//! (405), as tms_server `HttpResult` errors. Kept apart from the demo's login flow so it
 //! depends only on the registry, the deployment's base URL and its CORS
 //! setting.
 
@@ -22,7 +22,6 @@ use axum::{
 };
 use log::error;
 use serde::Serialize;
-use serde_json::json;
 
 pub const LIST_PATH: &str = "/v1/tms/institutions";
 /// The route of every context revision.
@@ -50,19 +49,30 @@ pub struct ContextRevision {
 /// the addendum's `x-context-sha256`.
 pub const CONTEXTS: &[ContextRevision] = &[ContextRevision { revision: 1, body: include_str!("../api/institutions.context.r1.jsonld") }];
 
-/// The list as the API sends it: the API's own model, kept apart from the
-/// registry's `Institution` so the stored data and the response can change
-/// separately. The `type` fields are the addendum's linked-data view.
+/// The list as the API sends it, in tms_server's response envelope
+/// (`result_code`, `result_msg`, then `num_<items>` and the items): the API's
+/// own model, kept apart from the registry's `Institution` so the stored
+/// data and the response can change separately. The `type` fields are the
+/// addendum's linked-data view.
 #[derive(Debug, Serialize)]
 struct InstitutionsResponse<'a> {
     /// JSON-LD type (aliased to `@type` by the context): schema:ItemList.
     #[serde(rename = "type")]
     kind: &'static str,
-    status: &'static str,
-    message: &'static str,
+    result_code: &'static str,
+    result_msg: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     data_version: Option<&'a str>,
-    result: Vec<InstitutionEntry<'a>>,
+    num_institutions: usize,
+    institutions: Vec<InstitutionEntry<'a>>,
+}
+
+/// tms_server's error body (`utils::errors::HttpResult` there).
+#[derive(Debug, Serialize)]
+struct HttpResult {
+    /// The HTTP status code, as a string.
+    result_code: String,
+    result_msg: String,
 }
 
 /// One entry of the list. Every field is written, `null` where it does not
@@ -212,29 +222,23 @@ async fn no_sniff(mut resp: Response) -> Response {
     resp
 }
 
-/// An RFC 9457 problem (`about:blank`, so the title is the status phrase),
-/// never stored.
-fn problem(status: StatusCode, detail: &str, mut headers: HeaderMap) -> Response {
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+json"));
+/// An `HttpResult` error, its message prefixed `ERROR: ` as tms_server's
+/// are, never stored.
+fn error_result(status: StatusCode, msg: &str, mut headers: HeaderMap) -> Response {
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    let body = json!({
-        "type": "about:blank",
-        "title": status.canonical_reason().unwrap_or_default(),
-        "status": status.as_u16(),
-        "detail": detail,
-    });
-    (status, headers, body.to_string()).into_response()
+    let body = HttpResult { result_code: status.as_u16().to_string(), result_msg: format!("ERROR: {msg}") };
+    (status, headers, Json(body)).into_response()
 }
 
 /// 503 for institution data that could not be read (worth a retry), 500 for
 /// data that is invalid. The cause goes to the server's log, not to the public.
-fn registry_problem(e: &RegistryError, headers: HeaderMap) -> Response {
+fn registry_error(e: &RegistryError, headers: HeaderMap) -> Response {
     error!("institutions list: {e}");
     match e {
         RegistryError::Unavailable(_) => {
-            problem(StatusCode::SERVICE_UNAVAILABLE, "The institution data cannot be read right now.", headers)
+            error_result(StatusCode::SERVICE_UNAVAILABLE, "The institution data cannot be read right now.", headers)
         }
-        RegistryError::Invalid(_) => problem(StatusCode::INTERNAL_SERVER_ERROR, "The institution data is invalid.", headers),
+        RegistryError::Invalid(_) => error_result(StatusCode::INTERNAL_SERVER_ERROR, "The institution data is invalid.", headers),
     }
 }
 
@@ -298,7 +302,7 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
     let mut out = api.cors.list_headers(&headers);
     let registry = match api.registry.current() {
         Ok(registry) => registry,
-        Err(e) => return registry_problem(&e, out),
+        Err(e) => return registry_error(&e, out),
     };
     let revision = latest_context().revision;
     // Weak: it names the data's and the context's revisions, not these exact
@@ -306,7 +310,7 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
     // ETag-safe when the registry loads.
     let etag = registry.data_version().map(|v| format!("W/\"{v};r{revision}\""));
     match preconditions(&headers, etag.as_deref()) {
-        Some(StatusCode::PRECONDITION_FAILED) => return problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
+        Some(StatusCode::PRECONDITION_FAILED) => return error_result(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
         Some(status) => {
             add_list_validators(&mut out, etag.as_deref());
             return (status, out).into_response();
@@ -314,12 +318,14 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
         None => add_list_validators(&mut out, etag.as_deref()),
     }
     out.insert(header::LINK, api.link.clone());
+    let institutions: Vec<_> = registry.approved().map(InstitutionEntry::from).collect();
     let body = InstitutionsResponse {
         kind: "ItemList",
-        status: "success",
-        message: "Approved institutions.",
+        result_code: "0",
+        result_msg: "success",
         data_version: registry.data_version(),
-        result: registry.approved().map(InstitutionEntry::from).collect(),
+        num_institutions: institutions.len(),
+        institutions,
     };
     (out, Json(body)).into_response()
 }
@@ -350,7 +356,7 @@ async fn preflight_institutions(State(api): State<ApiState>, headers: HeaderMap)
 async fn list_method_not_allowed(State(api): State<ApiState>, method: Method, headers: HeaderMap) -> Response {
     let mut out = api.cors.list_headers(&headers);
     out.insert(header::ALLOW, HeaderValue::from_static(LIST_ALLOW));
-    problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
+    error_result(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
 }
 
 /// Headers for every context response: open to any origin.
@@ -367,10 +373,10 @@ fn any_origin() -> HeaderMap {
 async fn get_context(Path(revision): Path<String>, headers: HeaderMap) -> Response {
     let mut out = any_origin();
     let Some(ctx) = context_revision(&revision) else {
-        return problem(StatusCode::NOT_FOUND, "No such resource.", out);
+        return error_result(StatusCode::NOT_FOUND, "No such resource.", out);
     };
     match preconditions(&headers, None) {
-        Some(StatusCode::PRECONDITION_FAILED) => problem(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
+        Some(StatusCode::PRECONDITION_FAILED) => error_result(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
         Some(status) => {
             out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
             (status, out).into_response()
@@ -388,10 +394,10 @@ async fn get_context(Path(revision): Path<String>, headers: HeaderMap) -> Respon
 async fn context_method_not_allowed(method: Method, Path(revision): Path<String>) -> Response {
     let mut out = any_origin();
     if context_revision(&revision).is_none() {
-        return problem(StatusCode::NOT_FOUND, "No such resource.", out);
+        return error_result(StatusCode::NOT_FOUND, "No such resource.", out);
     }
     out.insert(header::ALLOW, HeaderValue::from_static(CONTEXT_ALLOW));
-    problem(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
+    error_result(StatusCode::METHOD_NOT_ALLOWED, &format!("{method} is not supported here."), out)
 }
 
 /// Contract tests: the responses are checked against api/openapi.yaml and its
@@ -406,7 +412,7 @@ mod tests {
     use crate::institutions::Registry;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -502,15 +508,15 @@ mod tests {
         headers.get(name).map(|v| v.to_str().unwrap())
     }
 
-    /// An RFC 9457 problem as the spec gives it, with the given status.
-    fn assert_problem(status: StatusCode, expected: StatusCode, headers: &HeaderMap, body: &[u8]) {
+    /// An `HttpResult` error as the spec gives it, with the given status.
+    fn assert_error(status: StatusCode, expected: StatusCode, headers: &HeaderMap, body: &[u8]) {
         assert_eq!(status, expected);
-        assert_eq!(header(headers, header::CONTENT_TYPE), Some("application/problem+json"));
+        assert_eq!(header(headers, header::CONTENT_TYPE), Some("application/json"));
         assert_eq!(header(headers, header::CACHE_CONTROL), Some(spec_header("ErrorCacheControl").as_str()));
         let body: Value = serde_json::from_slice(body).unwrap();
-        assert_valid("Problem", &body);
-        assert_eq!(body["status"], expected.as_u16());
-        assert_eq!(body["title"], expected.canonical_reason().unwrap(), "title is the status phrase");
+        assert_valid("HttpResult", &body);
+        assert_eq!(body["result_code"], expected.as_u16().to_string(), "result_code is the status");
+        assert!(body["result_msg"].as_str().unwrap().starts_with("ERROR: "), "{body}");
     }
 
     #[tokio::test]
@@ -533,7 +539,8 @@ mod tests {
         assert_eq!(body["data_version"], "mock-0.1.0");
         // The API model's fields, not the registry's: no `approved`.
         let fields = ["type", "id", "name", "provider", "redirect_idp_domain", "idp_logout_url"];
-        for entry in body["result"].as_array().unwrap() {
+        assert_eq!(body["num_institutions"], body["institutions"].as_array().unwrap().len());
+        for entry in body["institutions"].as_array().unwrap() {
             let mut keys: Vec<&str> = entry.as_object().unwrap().keys().map(String::as_str).collect();
             keys.sort();
             let mut expected = fields.to_vec();
@@ -724,7 +731,7 @@ mod tests {
     async fn list_holds_only_approved_entries_in_a_stable_order() {
         let (_, _, body) = get(MOCK, LIST_PATH, None).await;
         let body: Value = serde_json::from_slice(&body).unwrap();
-        let ids: Vec<&str> = body["result"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = body["institutions"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["globus", "uchicago", "utexas", "sdsc", "stanford", "tacc_tapis"]);
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "each id at most once");
@@ -788,13 +795,13 @@ mod tests {
         for tag in [etag.as_str(), "\"mock-0.1.0;r1\"", "\"x\"", "*, \"x\"", &listed] {
             let headers = [(header::ORIGIN, PORTAL), (header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
             let (status, headers, body) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
-            assert_problem(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
+            assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{tag}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{tag}");
         }
         let context = context_path(latest_context().revision);
         let (status, headers, body) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "\"x\"")]).await;
-        assert_problem(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
+        assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
         assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
         let (status, _, _) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "*")]).await;
         assert_eq!(status, StatusCode::OK);
@@ -820,7 +827,7 @@ mod tests {
     /// 500, whatever If-None-Match says; both carry the list's CORS headers
     /// and keep the cause out of the public body.
     #[tokio::test]
-    async fn unreadable_registry_is_a_problem() {
+    async fn unreadable_registry_is_an_error() {
         let path = std::env::temp_dir().join(format!("registry-{}.json", uuid::Uuid::new_v4()));
         let source = RegistrySource::File(path.to_str().unwrap().into());
         let cors = Cors::Origins(vec![PORTAL.into()]);
@@ -830,7 +837,7 @@ mod tests {
                 std::fs::write(&path, c).unwrap();
             }
             let (status, out, body) = send_to(source.clone(), cors.clone(), Method::GET, LIST_PATH, &headers).await;
-            assert_problem(status, expected, &out, &body);
+            assert_error(status, expected, &out, &body);
             assert_eq!(header(&out, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL));
             assert_eq!(header(&out, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS));
             assert_eq!(header(&out, header::VARY), Some("Origin"));
@@ -867,7 +874,7 @@ mod tests {
         assert_ne!(new, old);
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["data_version"], "mock-0.1.1");
-        assert_eq!(body["result"].as_array().unwrap().len(), 10, "every entry now approved");
+        assert_eq!(body["num_institutions"], 10, "every entry now approved");
         assert_eq!(get_with(Some(new)).await.0, StatusCode::NOT_MODIFIED);
         std::fs::remove_file(&path).unwrap();
     }
@@ -877,7 +884,7 @@ mod tests {
         let cors = Cors::Origins(vec![PORTAL.into()]);
         for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::TRACE] {
             let (status, headers, body) = send(MOCK, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
-            assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
+            assert_error(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
             assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{method}");
@@ -886,7 +893,7 @@ mod tests {
         let context = context_path(latest_context().revision);
         for method in [Method::POST, Method::OPTIONS, Method::DELETE] {
             let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &context, &[]).await;
-            assert_problem(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
+            assert_error(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
             assert_eq!(header(&headers, header::ALLOW), Some(CONTEXT_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method}");
         }
@@ -903,7 +910,7 @@ mod tests {
                 let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &path, &[]).await;
                 assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
                 if method != Method::HEAD {
-                    assert_problem(status, StatusCode::NOT_FOUND, &headers, &body);
+                    assert_error(status, StatusCode::NOT_FOUND, &headers, &body);
                 }
                 assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method} {path}");
             }

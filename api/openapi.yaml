@@ -1,13 +1,17 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API
-  version: 0.9.0
+  version: 0.10.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
     One read-only endpoint: the list of approved institutions a user can
-    sign in through, with the IdP each one steers to.
+    sign in through, with the IdP each one steers to. Besides institutions,
+    the list holds the login options that steer to no institution: Globus
+    Auth with its own organization picker (`provider: globus`, no
+    `redirect_idp_domain`) and Tapis OAuth2 (`provider: tacc_tapis`).
 
-    The list comes in an envelope, `{ status, message, data_version, result }`.
+    The list comes in tms_server's response envelope,
+    `{ result_code, result_msg, data_version, num_institutions, institutions }`.
     Its entries come from the deployment's institution data: every entry
     an operator has approved for sign-in, and no other.
 
@@ -51,9 +55,9 @@ info:
     Every response carries `X-Content-Type-Options: nosniff`.
 
     ### Errors
-    Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
-    details (`application/problem+json`, the `Problem` schema), sent with
-    `Cache-Control: no-store`.
+    Errors are tms_server's `HttpResult` (`application/json`): `result_code`
+    is the HTTP status code as a string and `result_msg` says what went
+    wrong. They are sent with `Cache-Control: no-store`.
   contact:
     name: TACC
     url: https://tacc.utexas.edu
@@ -94,7 +98,7 @@ paths:
         that changes whenever `data_version` does. It is weak because it
         names a revision of the data, not the exact bytes: the same data may
         be sent with other bytes (field order, white space, a reworded
-        `message`). See *Conditional requests* above.
+        `result_msg`). See *Conditional requests* above.
 
         A `304` carries `Cache-Control` and `ETag`, as a `200` would, and no
         body or `Content-Type`.
@@ -118,10 +122,11 @@ paths:
                 approved:
                   summary: An abridged list
                   value:
-                    status: success
-                    message: Approved institutions.
+                    result_code: "0"
+                    result_msg: success
                     data_version: "2026-10-23.1"
-                    result:
+                    num_institutions: 3
+                    institutions:
                       - id: globus
                         name: Globus (default login, no redirect)
                         provider: globus
@@ -211,17 +216,15 @@ components:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/Problem"
+            $ref: "#/components/schemas/HttpResult"
           examples:
             invalid:
               summary: Invalid institution data
               value:
-                type: about:blank
-                title: Internal Server Error
-                status: 500
-                detail: The institution data is invalid.
+                result_code: "500"
+                result_msg: "ERROR: The institution data is invalid."
     DataUnavailable:
       description: |
         The institution data could not be read for now; the client may
@@ -234,59 +237,66 @@ components:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/Problem"
+            $ref: "#/components/schemas/HttpResult"
           examples:
             unavailable:
               summary: Unreachable institution data
               value:
-                type: about:blank
-                title: Service Unavailable
-                status: 503
-                detail: The institution data cannot be read right now.
+                result_code: "503"
+                result_msg: "ERROR: The institution data cannot be read right now."
 
   schemas:
     InstitutionsResponse:
       type: object
       description: |
-        Envelope around the institution list. Clients must ignore fields
-        they do not recognise.
-      required: [status, message, result]
+        tms_server's response envelope around the institution list. Clients
+        must ignore fields they do not recognise.
+      required: [result_code, result_msg, num_institutions, institutions]
       properties:
-        status:
-          const: success
-        message:
+        result_code:
+          const: "0"
+          description: tms_server's success code.
+        result_msg:
           type: string
           description: Human-readable summary of the response.
+          examples: [success]
         data_version:
           type: string
           description: |
             Revision of the institution data (not of this API), so a client can
             tell when the list has changed. The server MUST give the data a
-            new `data_version` whenever anything in `result` changes. Opaque;
-            limited to visible ASCII other than `"` and `,`, so a server can
-            put it inside a quoted `ETag` that `If-None-Match` lists keep
-            whole. Optional; readers must not require it.
+            new `data_version` whenever anything in `institutions` changes.
+            Opaque; limited to visible ASCII other than `"` and `,`, so a
+            server can put it inside a quoted `ETag` that `If-None-Match`
+            lists keep whole. Optional; readers must not require it.
           minLength: 1
           maxLength: 64
           pattern: "^[-!#-+.-~]+$"
           examples: ["2026-10-23.1"]
-        result:
+        num_institutions:
+          type: integer
+          minimum: 0
+          description: |
+            The number of entries in `institutions`; the server must keep
+            the two equal, since JSON Schema cannot.
+        institutions:
           type: array
           description: |
-            The approved institutions, in the server's stable order. Each
-            `id` appears at most once; the server must enforce this, since
-            JSON Schema cannot.
+            The approved entries, in the server's stable order. Each `id`
+            appears at most once; the server must enforce this, since JSON
+            Schema cannot.
           items:
             $ref: "#/components/schemas/Institution"
 
     Institution:
       type: object
       description: |
-        An organization users can sign in through. Responses always include
-        every field, writing `null` where a field does not apply. Clients must
-        ignore fields they do not recognise.
+        A sign-in option: an institution, or a login option that steers to
+        no institution (see the description of this API). Responses always
+        include every field, writing `null` where a field does not apply.
+        Clients must ignore fields they do not recognise.
       required: [id, name, provider, redirect_idp_domain, idp_logout_url]
       # A tacc_tapis entry never has an IdP domain.
       if:
@@ -324,8 +334,9 @@ components:
           pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
           description: |
             Domain Globus associates with the institution's IdP, in lower case.
-            `null` when the entry has no IdP to steer to, and always `null`
-            when `provider` is `tacc_tapis`.
+            `null` when the entry has no IdP to steer to (Globus Auth then
+            shows its organization picker), and always `null` when `provider`
+            is `tacc_tapis`.
           examples: [uchicago.edu]
         idp_logout_url:
           type: [string, "null"]
@@ -353,33 +364,19 @@ components:
       x-known-values: [globus, tacc_tapis]
       examples: [globus, tacc_tapis]
 
-    Problem:
+    HttpResult:
       type: object
       description: |
-        [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details.
-        `type` is `about:blank`, so `title` is the HTTP status phrase and
-        `detail` says what went wrong. Clients must ignore members they do
-        not recognise.
-      required: [type, title, status]
+        tms_server's error body. Clients must ignore fields they do not
+        recognise.
+      required: [result_code, result_msg]
       properties:
-        type:
+        result_code:
           type: string
-          format: uri-reference
-          description: Problem type; `about:blank` until a version defines others.
-          examples: [about:blank]
-        title:
+          pattern: "^[45][0-9]{2}$"
+          description: The response's HTTP status code, as a string.
+          examples: ["503"]
+        result_msg:
           type: string
           minLength: 1
-          description: Short summary of the problem type.
-        status:
-          type: integer
-          minimum: 400
-          maximum: 599
-          description: The response's HTTP status code.
-        detail:
-          type: string
-          description: Human-readable explanation of this occurrence.
-        instance:
-          type: string
-          format: uri-reference
-          description: Identifies this occurrence.
+          description: Human-readable explanation of what went wrong.

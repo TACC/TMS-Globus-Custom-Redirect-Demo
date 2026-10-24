@@ -13,7 +13,6 @@ so it travels with them to any implementation's repository.
 """
 
 import hashlib
-import http
 import os
 import pathlib
 import re
@@ -101,30 +100,56 @@ def test_addendum_example_is_the_core_example_with_types():
         assert not errors("LinkedList", example["value"], ADDENDUM), name
         core = list_example(SPEC)[name]["value"]
         untyped = {k: v for k, v in example["value"].items() if k != "type"}
-        untyped["result"] = [{k: v for k, v in e.items() if k != "type"} for e in untyped["result"]]
+        untyped["institutions"] = [{k: v for k, v in e.items() if k != "type"} for e in untyped["institutions"]]
         assert untyped == core, name
 
 
-def problem_examples():
-    for where, resp, doc in all_responses():
-        for example in resolve(resp, doc).get("content", {}).get("application/problem+json", {}).get("examples", {}).values():
-            yield where, example["value"]
+def error_responses():
+    """(where, status, response, doc) for every response whose body is an
+    HttpResult; status is None for a component response."""
+    for doc_name, doc in DOCS.items():
+        for path, item in doc["paths"].items():
+            for method, op in item.items():
+                for status, resp in op["responses"].items():
+                    if is_error(resolve(resp, doc)):
+                        yield f"{doc_name} {method.upper()} {path} {status}", status, resolve(resp, doc), doc
+        for name, resp in doc["components"].get("responses", {}).items():
+            if is_error(resp):
+                yield f"{doc_name} components/responses/{name}", None, resp, doc
 
 
-def test_problem_examples_conform():
+def is_error(resp):
+    schema = resp.get("content", {}).get("application/json", {}).get("schema", {})
+    return schema.get("$ref", "").endswith("/schemas/HttpResult")
+
+
+def test_error_examples_conform():
     checked = 0
-    for where, value in problem_examples():
-        assert not errors("Problem", value), where
-        assert value["title"] == http.HTTPStatus(value["status"]).phrase, where
-        checked += 1
-    assert checked >= 3, f"problem examples checked: {checked}"
+    for where, status, resp, _ in error_responses():
+        examples = resp["content"]["application/json"].get("examples")
+        assert examples, f"{where} has an example"
+        for example in examples.values():
+            value = example["value"]
+            assert not errors("HttpResult", value), where
+            if status:
+                assert value["result_code"] == status, f"{where}: result_code is the status"
+            checked += 1
+    assert checked >= 3, f"error examples checked: {checked}"
 
 
-def test_every_problem_response_has_an_example():
+def test_a_body_is_an_http_result_exactly_when_it_is_an_error():
+    # The addendum's error responses only add headers, so have no body.
     for where, resp, doc in all_responses():
-        problem = resolve(resp, doc).get("content", {}).get("application/problem+json")
-        if problem:
-            assert problem.get("examples"), where
+        status = where.split()[-1]
+        resp = resolve(resp, doc)
+        if status.isdigit() and "content" in resp:
+            assert is_error(resp) == (int(status) >= 400), where
+
+
+def test_list_examples_count_their_entries():
+    for doc in DOCS.values():
+        for name, example in list_example(doc).items():
+            assert example["value"]["num_institutions"] == len(example["value"]["institutions"]), name
 
 
 # Schemas
@@ -170,10 +195,10 @@ def test_every_field_is_required(field):
 
 
 def test_linked_types_are_checked():
-    good = {"type": "ItemList", "result": [{"type": "Organization"}]}
+    good = {"type": "ItemList", "institutions": [{"type": "Organization"}]}
     assert not errors("LinkedList", good, ADDENDUM)
     assert errors("LinkedList", {**good, "type": "Thing"}, ADDENDUM)
-    assert errors("LinkedList", {**good, "result": [{"type": "Thing"}]}, ADDENDUM)
+    assert errors("LinkedList", {**good, "institutions": [{"type": "Thing"}]}, ADDENDUM)
 
 
 def test_tacc_tapis_entries_have_no_domain():
@@ -188,7 +213,7 @@ def test_unknown_providers_are_accepted():
 
 def test_data_version_is_etag_safe():
     def response(version):
-        return {"status": "success", "message": "", "data_version": version, "result": []}
+        return {"result_code": "0", "result_msg": "", "data_version": version, "num_institutions": 0, "institutions": []}
 
     assert not errors("InstitutionsResponse", response("2026-10-23.1"))
     for bad in ["a,b", 'a"b', "a b", "", "a" * 65]:
@@ -215,6 +240,17 @@ def test_every_field_has_a_term_in_the_context():
     for schema in ("LinkedList", "LinkedEntry"):
         type_name = ADDENDUM["components"]["schemas"][schema]["properties"]["type"]["const"]
         assert isinstance(ctx.get(type_name), str), f"{schema} type {type_name}"
+
+
+def test_only_the_linked_envelope_fields_are_in_the_graph():
+    ctx = latest_context()
+    linked = set(ADDENDUM["components"]["schemas"]["LinkedList"]["properties"]) - {"type"}
+    assert linked <= set(SCHEMAS["InstitutionsResponse"]["properties"])
+    for field in SCHEMAS["InstitutionsResponse"]["properties"]:
+        if field in linked:
+            assert ctx[field] is not None, f"{field} is in the linked-data view, so the context maps it"
+        else:
+            assert ctx[field] is None, f"{field} describes the response, so the context leaves it out"
 
 
 def test_the_context_maps_no_field_the_spec_lacks():
@@ -296,11 +332,15 @@ def test_every_response_forbids_sniffing():
         assert headers.get("x-content-type-options") is COMPONENTS["headers"]["NoSniff"], where
 
 
-def test_problem_responses_are_never_stored():
-    for where, resp, doc in all_responses():
-        resp = resolve(resp, doc)
-        if "application/problem+json" in resp.get("content", {}):
-            assert resolve(resp["headers"]["Cache-Control"], doc) is COMPONENTS["headers"]["ErrorCacheControl"], where
+def test_errors_are_never_stored():
+    for where, _, resp, doc in error_responses():
+        assert resolve(resp["headers"]["Cache-Control"], doc) is COMPONENTS["headers"]["ErrorCacheControl"], where
+
+
+def test_error_schema_is_tms_servers_http_result():
+    assert errors("HttpResult", {"result_code": "500", "result_msg": "ERROR: x"}) == []
+    for bad in [{"result_code": 500, "result_msg": "x"}, {"result_code": "200", "result_msg": "x"}, {"result_code": "500"}, {"result_code": "500", "result_msg": ""}]:
+        assert errors("HttpResult", bad), bad
 
 
 # Header names whose values are comma-separated lists (RFC 9110 §5.6.1).

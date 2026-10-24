@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API, CORS and linked-data addendum
-  version: 0.9.0
+  version: 0.10.0
   summary: Optional additions to the core API, openapi.yaml.
   description: |
     Two optional additions to `openapi.yaml`, the core of the API. A
@@ -106,10 +106,11 @@ paths:
                   summary: An abridged list
                   value:
                     type: ItemList
-                    status: success
-                    message: Approved institutions.
+                    result_code: "0"
+                    result_msg: success
                     data_version: "2026-10-23.1"
-                    result:
+                    num_institutions: 3
+                    institutions:
                       - type: Organization
                         id: globus
                         name: Globus (default login, no redirect)
@@ -228,7 +229,7 @@ paths:
         SHA-256 `x-context-sha256` gives. The example below is the latest
         revision.
       x-context-sha256:
-        "1": b8c4082bcf683d07c26bac1369d75ca6cc24196f78282adaa55d0acf45636bbc
+        "1": 3fd9c4cab59eebc3f60d4650f7cff014519d846308c79e88c6eca551d0d5f796
       parameters:
         - $ref: "#/components/parameters/Revision"
         - $ref: "./openapi.yaml#/components/parameters/IfNoneMatch"
@@ -260,10 +261,11 @@ paths:
                       type: "@type"
                       ItemList: schema:ItemList
                       Organization: schema:Organization
-                      status: null
-                      message: null
+                      result_code: null
+                      result_msg: null
                       data_version: null
-                      result: schema:itemListElement
+                      num_institutions: schema:numberOfItems
+                      institutions: schema:itemListElement
                       id: schema:identifier
                       name: schema:name
                       provider:
@@ -295,17 +297,15 @@ paths:
             X-Content-Type-Options:
               $ref: "./openapi.yaml#/components/headers/NoSniff"
           content:
-            application/problem+json:
+            application/json:
               schema:
-                $ref: "./openapi.yaml#/components/schemas/Problem"
+                $ref: "./openapi.yaml#/components/schemas/HttpResult"
               examples:
                 unknown:
                   summary: An unpublished revision
                   value:
-                    type: about:blank
-                    title: Not Found
-                    status: 404
-                    detail: No such resource.
+                    result_code: "404"
+                    result_msg: "ERROR: No such resource."
 
 components:
   parameters:
@@ -393,13 +393,22 @@ components:
   schemas:
     LinkedList:
       type: object
-      description: The `type` fields the linked-data view adds to the list.
-      required: [type, result]
+      description: |
+        The linked-data view of the list: the `type` it adds, and the
+        envelope fields the context maps into the graph. The context leaves
+        the other envelope fields (`result_code`, `result_msg`,
+        `data_version`) out, since they describe the HTTP response, not the
+        list.
+      required: [type, institutions]
       properties:
         type:
           const: ItemList
           description: JSON-LD type (aliased to `@type`), schema:ItemList.
-        result:
+        num_institutions:
+          type: integer
+          description: Mapped to schema:numberOfItems.
+        institutions:
+          description: Mapped to schema:itemListElement, one link per entry.
           type: array
           items:
             $ref: "#/components/schemas/LinkedEntry"

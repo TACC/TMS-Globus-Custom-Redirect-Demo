@@ -13,14 +13,16 @@ checks this).
   entry a [schema:Organization](https://schema.org/Organization). The `type`
   fields carry those types into the graph; a context cannot add them on its
   own.
-- The list links each entry directly with `schema:itemListElement`. The
-  order of `result` is part of the JSON only; the graph does not record it.
+- The list links each entry directly with `schema:itemListElement`, and
+  `num_institutions` is its `schema:numberOfItems`. The order of
+  `institutions` is part of the JSON only; the graph does not record it.
 - Fields with no schema.org term (IdP domain, IdP sign-out URL, login
   provider) use the `tms:` vocabulary (`https://tacc.utexas.edu/ns/tms#`).
   That namespace is not published yet, so its IRIs do not resolve.
-- The envelope fields `status`, `message` and `data_version` describe the HTTP
-  response, not the institutions, so the context leaves them out of the
-  graph.
+- The envelope fields `result_code`, `result_msg` and `data_version`
+  describe the HTTP response, not the institutions, so the context leaves
+  them out of the graph. The addendum's `LinkedList` schema names the
+  envelope fields that are in it.
 - `provider` values are vocabulary terms (`"@type": "@vocab"`): the known
   values `globus` and `tacc_tapis` expand to `tms:GlobusProvider` and
   `tms:TaccTapisProvider`. `provider` is an open set, so a new value needs a

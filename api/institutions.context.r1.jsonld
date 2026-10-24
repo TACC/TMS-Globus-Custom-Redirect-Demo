@@ -7,10 +7,11 @@
     "ItemList": "schema:ItemList",
     "Organization": "schema:Organization",
 
-    "status": null,
-    "message": null,
+    "result_code": null,
+    "result_msg": null,
     "data_version": null,
-    "result": "schema:itemListElement",
+    "num_institutions": "schema:numberOfItems",
+    "institutions": "schema:itemListElement",
 
     "id": "schema:identifier",
     "name": "schema:name",
