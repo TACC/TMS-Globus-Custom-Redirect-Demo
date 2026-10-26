@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r conformance/requirements.txt
-      - run: python -m pytest -q -p no:cacheprovider scripts/check_spec.py
+      - run: python -m pytest -q -p no:cacheprovider scripts/check_spec.py scripts/check_addendum.py
       - run: python scripts/check_jsonld.py
 
   # The black-box conformance suite (conformance/) and the JSON-LD check

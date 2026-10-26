@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Approved Institutions API
-  version: 0.10.0
+  version: 0.11.0
   summary: The institutions a user can sign in through, and the IdP each one steers to.
   description: |
     One read-only endpoint: the list of approved institutions a user can
@@ -33,8 +33,10 @@ info:
     ### Requests
     - Query parameters are ignored.
     - `Accept` is ignored: the list is always `application/json`, never `406`.
-    - Generic HTTP behaviour (`HEAD`, `If-Match`, `405` for other methods)
-      follows RFC 9110 and is not restated here.
+    - `If-Match` is ignored: the list is read-only, so it has no state
+      for the header to protect, and is never `412`.
+    - Generic HTTP behaviour (`HEAD`, `405` for other methods) follows
+      RFC 9110 and is not restated here.
 
     ### Conditional requests
     `If-None-Match` is `*`, or a comma-separated list of entity tags. `*`
@@ -52,7 +54,9 @@ info:
     additions. A header with a single exact value is given as a `const`.
     Responses may carry headers this document does not mention.
 
-    Every response carries `X-Content-Type-Options: nosniff`.
+    Every response this document describes carries
+    `X-Content-Type-Options: nosniff`. Responses it leaves to RFC 9110
+    (a `405`, for example) need not.
 
     ### Errors
     Errors are tms_server's `HttpResult` (`application/json`): `result_code`

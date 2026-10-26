@@ -7,8 +7,9 @@ Point them at a running server, in any language:
 
 API_BASE_URL is the deployment's base URL with no trailing slash. API_SPEC
 points at the spec to test against (default: api/openapi.yaml in this
-repository); the addendum and context files are read from next to it, so
-the suite can be copied next to any copy of api/. API_EXTRA_HEADERS, a JSON
+repository), so the suite can be copied next to any copy of the spec. With
+API_ADDENDUM set, the addendum is read from next to the spec as well; a
+core-only copy needs no other file. API_EXTRA_HEADERS, a JSON
 object, adds headers to every request, for example the credentials a
 gateway in front of a staging server needs.
 
@@ -38,7 +39,6 @@ import yaml
 
 SPEC_PATH = pathlib.Path(os.environ.get("API_SPEC") or pathlib.Path(__file__).resolve().parent.parent / "api/openapi.yaml")
 SPEC = yaml.safe_load(SPEC_PATH.read_text())
-ADDENDUM_SPEC = yaml.safe_load((SPEC_PATH.parent / "openapi.addendum.yaml").read_text())
 
 BASE = os.environ.get("API_BASE_URL", "")
 if not BASE or BASE.endswith("/"):
@@ -60,11 +60,18 @@ if _formats:
 addendum = pytest.mark.skipif(not ADDENDUM, reason="the deployment does not serve the addendum (API_ADDENDUM)")
 
 LIST = "/v1/tms/institutions"
-CONTEXT = next(p for p in ADDENDUM_SPEC["paths"] if "{revision}" in p)
-CONTEXT_GET = ADDENDUM_SPEC["paths"][CONTEXT]["get"]
-REVISIONS = [int(r) for r in ADDENDUM_SPEC["components"]["parameters"]["Revision"]["schema"]["enum"]]
-LATEST = max(REVISIONS)
-CONTEXT_SHA256 = CONTEXT_GET["x-context-sha256"]
+if ADDENDUM:
+    ADDENDUM_SPEC = yaml.safe_load((SPEC_PATH.parent / "openapi.addendum.yaml").read_text())
+    CONTEXT = next(p for p in ADDENDUM_SPEC["paths"] if "{revision}" in p)
+    CONTEXT_GET = ADDENDUM_SPEC["paths"][CONTEXT]["get"]
+    REVISIONS = [int(r) for r in ADDENDUM_SPEC["components"]["parameters"]["Revision"]["schema"]["enum"]]
+    LATEST = max(REVISIONS)
+    # Revisions that were never published.
+    UNPUBLISHED = ["0", "01", "+1", f"r{LATEST}", str(LATEST + 1)]
+else:
+    # Core only: the addendum need not be next to the spec, and its tests are skipped.
+    ADDENDUM_SPEC = CONTEXT = CONTEXT_GET = LATEST = None
+    REVISIONS = UNPUBLISHED = []
 UNLISTED = "https://unlisted.invalid"
 # Origins to send: none, one the setting does not list, and a listed one.
 ORIGINS = [None, UNLISTED] + ([CORS[0]] if isinstance(CORS, list) else [])
@@ -97,7 +104,6 @@ def addendum_required(name):
     return header_required(name, ADDENDUM_SPEC)
 
 
-PREFLIGHT_HEADERS = ADDENDUM_SPEC["paths"][LIST]["options"]["responses"]["204"]["headers"]
 NO_SNIFF = header_const("NoSniff")
 
 
@@ -285,6 +291,16 @@ def test_other_if_none_match_gets_the_list(listing):
         assert call("GET", LIST, {"If-None-Match": tag}).status == 200, tag
 
 
+def test_if_match_is_ignored(listing):
+    etag = listing.header("etag")
+    for tag in ['"x"', NO_SUCH_TAG, "*"] + ([etag] if etag else []):
+        resp = call("GET", LIST, {"If-Match": tag})
+        assert resp.status == 200, tag
+        assert resp.json()["institutions"] == listing.json()["institutions"]
+        # If-None-Match still counts alongside it.
+        assert call("GET", LIST, {"If-Match": tag, "If-None-Match": "*"}).status == 304, tag
+
+
 # Addendum: api/openapi.addendum.yaml
 
 
@@ -319,8 +335,9 @@ def test_preflight(origin):
     assert resp.header("x-content-type-options") == NO_SNIFF
     allow = allowed(origin)
     assert resp.header("access-control-allow-origin") == allow
-    assert_includes(resp, "access-control-allow-methods", required(PREFLIGHT_HEADERS["Access-Control-Allow-Methods"]) if allow else None, names=False)
-    assert_includes(resp, "access-control-allow-headers", required(PREFLIGHT_HEADERS["Access-Control-Allow-Headers"]) if allow else None)
+    preflight_headers = ADDENDUM_SPEC["paths"][LIST]["options"]["responses"]["204"]["headers"]
+    assert_includes(resp, "access-control-allow-methods", required(preflight_headers["Access-Control-Allow-Methods"]) if allow else None, names=False)
+    assert_includes(resp, "access-control-allow-headers", required(preflight_headers["Access-Control-Allow-Headers"]) if allow else None)
     max_age = resp.header("access-control-max-age")
     if allow:
         assert max_age is not None and max_age.isdigit(), max_age
@@ -343,7 +360,7 @@ def test_every_context_revision_is_served(revision):
     assert resp.header("access-control-allow-origin") == addendum_const("AnyOrigin")
     assert_cache_control(resp, addendum_required("ContextCacheControl"))
     # Served byte for byte as published.
-    assert hashlib.sha256(resp.body).hexdigest() == CONTEXT_SHA256[str(revision)]
+    assert hashlib.sha256(resp.body).hexdigest() == CONTEXT_GET["x-context-sha256"][str(revision)]
 
 
 @addendum
@@ -369,7 +386,7 @@ def test_context_conditional_requests(revision):
 
 
 @addendum
-@pytest.mark.parametrize("revision", ["0", "01", "+1", f"r{LATEST}", str(LATEST + 1)])
+@pytest.mark.parametrize("revision", UNPUBLISHED)
 def test_unpublished_revisions_are_not_found(revision):
     resp = call("GET", context_path(revision))
     assert_error(resp, 404)

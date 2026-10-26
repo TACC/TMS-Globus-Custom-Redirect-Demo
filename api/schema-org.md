@@ -6,7 +6,7 @@ to produce the list; it explains why the fields map to the terms they do.
 
 The payload stays plain, flat JSON. The latest context is the mapping: it
 gives every field of the spec's schemas a term, or `null` to leave it out
-of the graph, and maps no field the spec lacks (`scripts/check_spec.py`
+of the graph, and maps no field the spec lacks (`scripts/check_addendum.py`
 checks this).
 
 - The response is a [schema:ItemList](https://schema.org/ItemList) and each

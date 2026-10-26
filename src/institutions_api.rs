@@ -5,9 +5,10 @@
 //!   OPTIONS /v1/tms/institutions                  CORS preflight for that list (addendum)
 //!   GET     /v1/tms/contexts/institutions/<n>     each revision of the JSON-LD context for that list (addendum)
 //!
-//! Every response carries `X-Content-Type-Options: nosniff`. Beyond the
-//! spec, it follows RFC 9110 for HEAD, If-Match (412) and other methods
-//! (405), as tms_server `HttpResult` errors. Kept apart from the demo's login flow so it
+//! Every response carries `X-Content-Type-Options: nosniff`, the 405s the
+//! spec leaves to RFC 9110 included. Beyond the spec, it follows RFC 9110
+//! for HEAD and other methods (405, as a tms_server `HttpResult` error), and
+//! ignores If-Match as the spec says. Kept apart from the demo's login flow so it
 //! depends only on the registry, the deployment's base URL and its CORS
 //! setting.
 
@@ -283,19 +284,16 @@ fn entity_tags(field: &[u8]) -> Vec<&[u8]> {
     tags
 }
 
-/// Evaluates `If-Match` and then `If-None-Match` against a resource that
-/// exists and has the weak `etag` (None if it has none), as RFC 9110
-/// §13.2.2 orders them: the status to answer with instead, if any.
-fn preconditions(headers: &HeaderMap, etag: Option<&str>) -> Option<StatusCode> {
-    // If-Match compares strongly, and every tag here is weak, so only `*` passes.
-    if field(headers, header::IF_MATCH).is_some_and(|f| trim_ows(&f) != b"*") {
-        return Some(StatusCode::PRECONDITION_FAILED);
-    }
-    let field = field(headers, header::IF_NONE_MATCH)?;
+/// Whether `If-None-Match` matches a resource that exists and has the weak
+/// `etag` (None if it has none), so the answer is a 304. `If-Match` is
+/// ignored: the API is read-only.
+fn not_modified(headers: &HeaderMap, etag: Option<&str>) -> bool {
+    let Some(field) = field(headers, header::IF_NONE_MATCH) else {
+        return false;
+    };
     // `*` is only valid as the whole field, never as a list member.
     let ours = etag.map(|e| e.strip_prefix("W/").unwrap_or(e).as_bytes());
-    let matched = trim_ows(&field) == b"*" || ours.is_some_and(|ours| entity_tags(&field).contains(&ours));
-    matched.then_some(StatusCode::NOT_MODIFIED)
+    trim_ows(&field) == b"*" || ours.is_some_and(|ours| entity_tags(&field).contains(&ours))
 }
 
 async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> Response {
@@ -309,13 +307,9 @@ async fn list_institutions(State(api): State<ApiState>, headers: HeaderMap) -> R
     // bytes, and changes when either does. The data's version is checked to be
     // ETag-safe when the registry loads.
     let etag = registry.data_version().map(|v| format!("W/\"{v};r{revision}\""));
-    match preconditions(&headers, etag.as_deref()) {
-        Some(StatusCode::PRECONDITION_FAILED) => return error_result(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
-        Some(status) => {
-            add_list_validators(&mut out, etag.as_deref());
-            return (status, out).into_response();
-        }
-        None => add_list_validators(&mut out, etag.as_deref()),
+    add_list_validators(&mut out, etag.as_deref());
+    if not_modified(&headers, etag.as_deref()) {
+        return (StatusCode::NOT_MODIFIED, out).into_response();
     }
     out.insert(header::LINK, api.link.clone());
     let institutions: Vec<_> = registry.approved().map(InstitutionEntry::from).collect();
@@ -375,18 +369,12 @@ async fn get_context(Path(revision): Path<String>, headers: HeaderMap) -> Respon
     let Some(ctx) = context_revision(&revision) else {
         return error_result(StatusCode::NOT_FOUND, "No such resource.", out);
     };
-    match preconditions(&headers, None) {
-        Some(StatusCode::PRECONDITION_FAILED) => error_result(StatusCode::PRECONDITION_FAILED, "If-Match did not match.", out),
-        Some(status) => {
-            out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
-            (status, out).into_response()
-        }
-        None => {
-            out.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/ld+json"));
-            out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
-            (out, ctx.body).into_response()
-        }
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static(CONTEXT_CACHE_CONTROL));
+    if not_modified(&headers, None) {
+        return (StatusCode::NOT_MODIFIED, out).into_response();
     }
+    out.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/ld+json"));
+    (out, ctx.body).into_response()
 }
 
 /// Any other method on a context path: a 404 for an unpublished revision,
@@ -402,9 +390,9 @@ async fn context_method_not_allowed(method: Method, Path(revision): Path<String>
 
 /// Contract tests: the responses are checked against api/openapi.yaml and its
 /// addendum themselves, and the RFC 9110 behaviour beyond them (HEAD,
-/// If-Match, 405) against the constants here. The documents' own
-/// consistency (examples, context agreement, revision bookkeeping) is
-/// checked by scripts/check_spec.py, and conformance/ checks the same
+/// 405) against the constants here. The documents' own consistency
+/// (examples, context agreement, revision bookkeeping) is checked by
+/// scripts/check_spec.py and scripts/check_addendum.py, and conformance/ checks the same
 /// contract over HTTP against any deployment.
 #[cfg(test)]
 mod tests {
@@ -787,30 +775,21 @@ mod tests {
         assert!(entity_tags(b"").is_empty());
     }
 
-    /// Every tag here is weak, so If-Match (strong comparison, RFC 9110
-    /// §13.1.1) only passes as `*`.
+    /// If-Match is ignored (the API is read-only): never a 412, and
+    /// If-None-Match still decides between 200 and 304.
     #[tokio::test]
-    async fn if_match_passes_only_as_any() {
-        let cors = Cors::Origins(vec![PORTAL.into()]);
+    async fn if_match_is_ignored() {
         let etag = fixture_etag();
-        let (status, _, _) = request(FIXTURE, cors.clone(), LIST_PATH, &[(header::IF_MATCH, "*")]).await;
-        assert_eq!(status, StatusCode::OK);
-        // `*` is valid only as the whole field, so a list holding it fails too.
-        let listed = format!("*, {etag}");
-        let strong = etag.trim_start_matches("W/");
-        for tag in [etag.as_str(), strong, "\"x\"", "*, \"x\"", &listed] {
-            let headers = [(header::ORIGIN, PORTAL), (header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
-            let (status, headers, body) = request(FIXTURE, cors.clone(), LIST_PATH, &headers).await;
-            assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
-            assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{tag}");
-            assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{tag}");
-        }
         let context = context_path(latest_context().revision);
-        let (status, headers, body) = request(FIXTURE, Cors::SameOrigin, &context, &[(header::IF_MATCH, "\"x\"")]).await;
-        assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
-        assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
-        let (status, _, _) = request(FIXTURE, Cors::SameOrigin, &context, &[(header::IF_MATCH, "*")]).await;
-        assert_eq!(status, StatusCode::OK);
+        for tag in [etag.as_str(), "\"x\"", "*", "*, \"x\""] {
+            for path in [LIST_PATH, context.as_str()] {
+                let (status, _, _) = request(FIXTURE, Cors::SameOrigin, path, &[(header::IF_MATCH, tag)]).await;
+                assert_eq!(status, StatusCode::OK, "{path} {tag}");
+                let headers = [(header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
+                let (status, _, _) = request(FIXTURE, Cors::SameOrigin, path, &headers).await;
+                assert_eq!(status, StatusCode::NOT_MODIFIED, "{path} {tag}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -939,7 +918,6 @@ mod tests {
         let cases: &[Case] = &[
             (Method::GET, LIST_PATH, &[]),
             (Method::GET, LIST_PATH, &[(header::IF_NONE_MATCH, etag.as_str())]),
-            (Method::GET, LIST_PATH, &[(header::IF_MATCH, "\"x\"")]),
             (Method::OPTIONS, LIST_PATH, &[]),
             (Method::POST, LIST_PATH, &[]),
             (Method::GET, &context, &[]),
@@ -984,7 +962,7 @@ mod tests {
     /// api/institutions.context.r<n+1>.jsonld and a CONTEXTS row for it, add
     /// n+1 to the addendum's `revision` enum and its hash to
     /// `x-context-sha256`, and point the addendum's Link header and context
-    /// example at it; these tests and scripts/check_spec.py catch a missed step.
+    /// example at it; these tests and scripts/check_addendum.py catch a missed step.
     #[test]
     fn published_contexts_do_not_change() {
         let revisions: Vec<u32> = CONTEXTS.iter().map(|c| c.revision).collect();

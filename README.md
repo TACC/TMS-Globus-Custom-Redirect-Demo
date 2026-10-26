@@ -319,7 +319,8 @@ The test IdP's issuer is always `<BASE_URL>/idp`.
 cargo test
 npx @redocly/cli@2.60.0 lint                  # the spec and addendum, configured by redocly.yaml
 pip install -r conformance/requirements.txt
-python -m pytest scripts/check_spec.py        # the spec and addendum against themselves and the contexts
+python -m pytest scripts/check_spec.py        # the core spec against itself
+python -m pytest scripts/check_addendum.py    # the addendum against the core and the contexts
 python scripts/check_jsonld.py                # the addendum's example
 conformance/run_against_demo.sh               # conformance suite + live JSON-LD check, per CORS setting
 ```
@@ -333,13 +334,18 @@ envelope `{result_code: "0", result_msg, num_institutions, institutions}`,
 and `HttpResult` errors). `api/openapi.addendum.yaml` is optional
 and adds to it: the list's CORS headers and `OPTIONS` preflight, and the
 linked-data view (`type` fields, `Link`, and the contexts at
-`/v1/tms/contexts/institutions/<n>`). Generic HTTP behaviour (`HEAD`,
-`If-Match`, `405` for other methods) follows RFC 9110 and is in neither.
+`/v1/tms/contexts/institutions/<n>`). `If-Match` is ignored, since the
+API is read-only. Generic HTTP behaviour (`HEAD`, `405` for other methods)
+follows RFC 9110 and is in neither; `nosniff` is required only on the
+responses the documents describe.
 
 The documents' own checks need no implementation, so they travel with
-`api/` to any server's repository. `scripts/check_spec.py` checks that the
-examples fit their schemas (and that the addendum's example is the core's
-with `type` fields added), that the schemas refuse bad entries, that the
+`api/` to any server's repository. `scripts/check_spec.py` needs only
+`api/openapi.yaml`: it checks that the examples fit their schemas, that the
+schemas refuse bad entries, and that the response headers follow the
+document's rules. `scripts/check_addendum.py` reuses its helpers for the
+addendum: it checks that the addendum's example is the core's with `type`
+fields added, that the addendum follows the same header rules, that the
 latest JSON-LD context gives every field a term or `null` and maps no field
 the spec lacks (and maps every known `provider` value), that the context
 files, the `revision` enum and `x-context-sha256` agree, and that
@@ -354,13 +360,13 @@ The demo's API contract tests in `src/institutions_api.rs` call the API
 in-process and validate the responses against the schemas in
 `api/openapi.yaml` and its addendum, check their headers (`Link`, `Cache-Control`, the weak
 `ETag` `W/"<data_version>;r<n>"`, `If-None-Match` parsed by the RFC 9110
-grammar and `If-Match`, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS`
+grammar, `If-Match` ignored, `304 Not Modified`, `HEAD`, CORS and the `OPTIONS`
 preflight on the list for each `CORS_ALLOWED_ORIGINS` setting, CORS on the
 context, `X-Content-Type-Options: nosniff` everywhere), the `HttpResult`
-errors (404 for an unpublished revision, 405, 412, and 500/503 from a broken or
+errors (404 for an unpublished revision, 405, and 500/503 from a broken or
 missing registry file), and that the served contexts and providers are the
-ones the documents publish. `HEAD`, `If-Match` (412) and 405 are checked
-against RFC 9110 rather than the spec.
+ones the documents publish. `HEAD` and 405 are checked against RFC 9110
+rather than the spec.
 
 `conformance/` is a black-box suite for any implementation of the spec, in
 any language: it takes every expectation from the spec and addendum
@@ -376,7 +382,8 @@ API_BASE_URL=https://tms.example.org API_ADDENDUM=1 API_CORS='https://portal.exa
 The core tests always run; `API_ADDENDUM=1` adds the addendum's, for a
 deployment that serves it. `API_CORS` is then its allowed-origin setting
 (empty, `*`, or comma-separated origins). `API_SPEC=<path>` tests another
-copy of the spec. `API_EXTRA_HEADERS`, a JSON object, adds headers to every
+copy of the spec; without `API_ADDENDUM`, no other file need be next to
+it. `API_EXTRA_HEADERS`, a JSON object, adds headers to every
 request (for a gateway's credentials, say); `check_jsonld.py --url` honours
 it too. Header values are compared as the documents' "Header values"
 sections allow: a list-valued header (`Cache-Control`, `Vary`, the
