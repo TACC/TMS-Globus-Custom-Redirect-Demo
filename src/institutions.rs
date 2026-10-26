@@ -165,6 +165,17 @@ impl RegistrySource {
     }
 }
 
+/// The registry every test reads, tests/fixtures/registry.json: owned by the
+/// tests, so the demo's mock data can change freely. Its approved and
+/// unapproved entries are interleaved, out of alphabetical order, and include
+/// both login options that steer to no institution (`globus`, `tacc_tapis`).
+#[cfg(test)]
+pub const FIXTURE: &str = include_str!("../tests/fixtures/registry.json");
+
+/// The fixture's `data_version`.
+#[cfg(test)]
+pub const FIXTURE_VERSION: &str = "fixture-1";
+
 /// Whether `id` has the shape api/openapi.yaml gives institution ids
 /// (`^[a-z0-9_]+$`, at most 64 long), so a malformed one can be refused as a
 /// bad request rather than looked up.
@@ -255,8 +266,6 @@ pub fn identity_matches(inst: &Institution, username: &str) -> bool {
 mod tests {
     use super::*;
 
-    const MOCK: &str = include_str!("../mock/approved_institutions.json");
-
     /// A one-entry registry with `field` set to `value` in its entry.
     fn with(field: &str, value: serde_json::Value) -> Result<Registry, String> {
         let mut entry = serde_json::json!({
@@ -269,27 +278,27 @@ mod tests {
 
     #[test]
     fn lookup_covers_all_known_institutions_only() {
-        let reg = Registry::from_json(MOCK).unwrap();
+        let reg = Registry::from_json(FIXTURE).unwrap();
         assert!(reg.approved().all(|i| i.approved));
-        assert!(!reg.find("example").unwrap().approved);
-        assert!(reg.find("uchicago").unwrap().approved);
+        assert!(!reg.find("beta").unwrap().approved);
+        assert!(reg.find("alpha").unwrap().approved);
         assert!(reg.find("nope").is_none());
     }
 
     #[test]
     fn identity_must_be_from_the_institution_domain() {
-        let reg = Registry::from_json(MOCK).unwrap();
-        let uc = reg.find("uchicago").unwrap();
-        assert!(identity_matches(uc, "jdoe@uchicago.edu"));
-        assert!(identity_matches(uc, "JDoe@UChicago.edu"));
-        assert!(!identity_matches(uc, "jdoe@globusid.org"));
-        assert!(!identity_matches(uc, "jdoe@evil-uchicago.edu"));
-        assert!(!identity_matches(uc, "uchicago.edu"));
+        let reg = Registry::from_json(FIXTURE).unwrap();
+        let alpha = reg.find("alpha").unwrap();
+        assert!(identity_matches(alpha, "jdoe@alpha.edu"));
+        assert!(identity_matches(alpha, "JDoe@Alpha.edu"));
+        assert!(!identity_matches(alpha, "jdoe@globusid.org"));
+        assert!(!identity_matches(alpha, "jdoe@evil-alpha.edu"));
+        assert!(!identity_matches(alpha, "alpha.edu"));
     }
 
     #[test]
     fn entries_without_a_domain_accept_any_identity() {
-        let reg = Registry::from_json(MOCK).unwrap();
+        let reg = Registry::from_json(FIXTURE).unwrap();
         let globus = reg.find("globus").unwrap();
         assert_eq!(globus.provider, Provider::Globus);
         assert!(identity_matches(globus, "jdoe@globusid.org"));
@@ -306,7 +315,7 @@ mod tests {
 
     #[test]
     fn ids_must_match_the_spec_pattern() {
-        assert!(Registry::from_json(MOCK).is_ok());
+        assert!(Registry::from_json(FIXTURE).is_ok());
         for bad in ["", "UChicago", "u chicago", "uchicago.edu", "../x", &"a".repeat(65)] {
             assert!(!is_valid_id(bad), "{bad:?}");
             assert!(with("id", bad.into()).is_err(), "{bad:?}");
@@ -341,7 +350,7 @@ mod tests {
     fn version_is_optional_and_etag_safe() {
         let unversioned = r#"{"institutions":[]}"#;
         assert_eq!(Registry::from_json(unversioned).unwrap().data_version(), None);
-        assert_eq!(Registry::from_json(MOCK).unwrap().data_version(), Some("mock-0.1.0"));
+        assert_eq!(Registry::from_json(FIXTURE).unwrap().data_version(), Some(FIXTURE_VERSION));
         // The pre-0.8 key is refused, so a stale file cannot silently lose its revision.
         assert!(Registry::from_json(r#"{"version":"x","institutions":[]}"#).is_err());
         for bad in ["", "a b", "a\"b", "a,b", &"v".repeat(65)] {
@@ -404,8 +413,8 @@ mod tests {
         ] {
             assert!(with("idp_logout_url", bad.into()).is_err(), "{bad:?}");
         }
-        let reg = Registry::from_json(MOCK).unwrap();
-        assert!(reg.find("utexas").unwrap().idp_logout_url.is_some());
+        let reg = Registry::from_json(FIXTURE).unwrap();
+        assert!(reg.find("zeta").unwrap().idp_logout_url.is_some());
         assert!(reg.find("globus").unwrap().idp_logout_url.is_none());
     }
 
@@ -416,10 +425,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("registry-{}.json", uuid::Uuid::new_v4()));
         let source = RegistrySource::File(path.to_str().unwrap().into());
         assert!(matches!(source.current(), Err(RegistryError::Unavailable(_))));
-        std::fs::write(&path, MOCK).unwrap();
-        assert_eq!(source.current().unwrap().data_version(), Some("mock-0.1.0"));
-        std::fs::write(&path, MOCK.replace("mock-0.1.0", "mock-0.1.1")).unwrap();
-        assert_eq!(source.current().unwrap().data_version(), Some("mock-0.1.1"));
+        std::fs::write(&path, FIXTURE).unwrap();
+        assert_eq!(source.current().unwrap().data_version(), Some(FIXTURE_VERSION));
+        std::fs::write(&path, FIXTURE.replace(FIXTURE_VERSION, "fixture-2")).unwrap();
+        assert_eq!(source.current().unwrap().data_version(), Some("fixture-2"));
         std::fs::write(&path, "{").unwrap();
         assert!(matches!(source.current(), Err(RegistryError::Invalid(_))));
         std::fs::remove_file(&path).unwrap();

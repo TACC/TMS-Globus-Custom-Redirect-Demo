@@ -409,7 +409,7 @@ async fn context_method_not_allowed(method: Method, Path(revision): Path<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::institutions::Registry;
+    use crate::institutions::{Registry, FIXTURE, FIXTURE_VERSION};
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use serde_json::{json, Value};
@@ -418,14 +418,13 @@ mod tests {
 
     const SPEC: &str = include_str!("../api/openapi.yaml");
     const ADDENDUM: &str = include_str!("../api/openapi.addendum.yaml");
-    const MOCK: &str = include_str!("../mock/approved_institutions.json");
     const BASE: &str = "https://tms.example.org";
     /// The addendum's path for every context revision.
     const CONTEXT_SPEC_PATH: &str = "/v1/tms/contexts/institutions/{revision}";
 
-    /// The mock registry's ETag: its version and the latest context revision.
-    fn mock_etag() -> String {
-        format!("W/\"mock-0.1.0;r{}\"", latest_context().revision)
+    /// The fixture registry's ETag: its version and the latest context revision.
+    fn fixture_etag() -> String {
+        format!("W/\"{FIXTURE_VERSION};r{}\"", latest_context().revision)
     }
 
     fn sha256(text: &str) -> String {
@@ -504,7 +503,7 @@ mod tests {
         (parts.status, parts.headers, to_bytes(body, usize::MAX).await.unwrap().to_vec())
     }
 
-    fn header<'a>(headers: &'a HeaderMap, name: header::HeaderName) -> Option<&'a str> {
+    fn header(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
         headers.get(name).map(|v| v.to_str().unwrap())
     }
 
@@ -521,14 +520,14 @@ mod tests {
 
     #[tokio::test]
     async fn list_conforms_to_the_spec_and_addendum() {
-        let (status, headers, body) = get(MOCK, LIST_PATH, None).await;
+        let (status, headers, body) = get(FIXTURE, LIST_PATH, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
         assert_eq!(header(&headers, header::LINK), Some(link_to(&context_path(latest_context().revision)).as_str()));
         assert_eq!(header(&headers, header::X_CONTENT_TYPE_OPTIONS), Some(spec_header("NoSniff").as_str()));
         assert_eq!(header(&headers, header::CACHE_CONTROL), Some(spec_header("ListCacheControl").as_str()));
-        assert_eq!(header(&headers, header::ETAG), Some(mock_etag().as_str()));
-        assert!(header_fits("ETag", &mock_etag()));
+        assert_eq!(header(&headers, header::ETAG), Some(fixture_etag().as_str()));
+        assert!(header_fits("ETag", &fixture_etag()));
         // Same-origin only: no CORS headers at all.
         assert!(!headers.keys().any(|k| k.as_str().starts_with("access-control-")));
         assert!(header(&headers, header::VARY).is_none());
@@ -536,7 +535,7 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_valid("InstitutionsResponse", &body);
         assert_valid_in(&addendum(), "LinkedList", &body);
-        assert_eq!(body["data_version"], "mock-0.1.0");
+        assert_eq!(body["data_version"], FIXTURE_VERSION);
         // The API model's fields, not the registry's: no `approved`.
         let fields = ["type", "id", "name", "provider", "redirect_idp_domain", "idp_logout_url"];
         assert_eq!(body["num_institutions"], body["institutions"].as_array().unwrap().len());
@@ -562,14 +561,14 @@ mod tests {
     /// Query strings and Accept change nothing.
     #[tokio::test]
     async fn query_and_accept_are_ignored() {
-        let (_, _, plain) = get(MOCK, LIST_PATH, None).await;
-        let (status, _, body) = get(MOCK, &format!("{LIST_PATH}?format=xml&x=1"), None).await;
+        let (_, _, plain) = get(FIXTURE, LIST_PATH, None).await;
+        let (status, _, body) = get(FIXTURE, &format!("{LIST_PATH}?format=xml&x=1"), None).await;
         assert_eq!((status, &body), (StatusCode::OK, &plain));
-        let (status, headers, body) = request(MOCK, Cors::SameOrigin, LIST_PATH, &[(header::ACCEPT, "application/xml")]).await;
+        let (status, headers, body) = request(FIXTURE, Cors::SameOrigin, LIST_PATH, &[(header::ACCEPT, "application/xml")]).await;
         assert_eq!((status, &body), (StatusCode::OK, &plain));
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/json"));
         let context = context_path(latest_context().revision);
-        let (status, headers, _) = request(MOCK, Cors::SameOrigin, &format!("{context}?x=1"), &[(header::ACCEPT, "text/html")]).await;
+        let (status, headers, _) = request(FIXTURE, Cors::SameOrigin, &format!("{context}?x=1"), &[(header::ACCEPT, "text/html")]).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
     }
@@ -579,12 +578,12 @@ mod tests {
     #[tokio::test]
     async fn head_matches_get() {
         let context = context_path(latest_context().revision);
-        let etag = mock_etag();
+        let etag = fixture_etag();
         let cors = Cors::Origins(vec![PORTAL.into()]);
         for (path, tag) in [(LIST_PATH, None), (LIST_PATH, Some(etag.as_str())), (context.as_str(), None), (context.as_str(), Some("*"))] {
             let headers: Vec<_> = [(header::ORIGIN, PORTAL)].into_iter().chain(tag.map(|t| (header::IF_NONE_MATCH, t))).collect();
-            let (get_status, get_headers, _) = send(MOCK, cors.clone(), Method::GET, path, &headers).await;
-            let (status, out, body) = send(MOCK, cors.clone(), Method::HEAD, path, &headers).await;
+            let (get_status, get_headers, _) = send(FIXTURE, cors.clone(), Method::GET, path, &headers).await;
+            let (status, out, body) = send(FIXTURE, cors.clone(), Method::HEAD, path, &headers).await;
             assert_eq!(status, get_status, "{path} {tag:?}");
             assert!(body.is_empty());
             assert_eq!(out, get_headers, "{path} {tag:?}");
@@ -623,7 +622,7 @@ mod tests {
             .into_iter()
             .chain([(header::ACCESS_CONTROL_REQUEST_METHOD, "GET"), (header::ACCESS_CONTROL_REQUEST_HEADERS, "if-none-match")])
             .collect();
-        send(MOCK, cors, Method::OPTIONS, LIST_PATH, &headers).await
+        send(FIXTURE, cors, Method::OPTIONS, LIST_PATH, &headers).await
     }
 
     #[tokio::test]
@@ -670,10 +669,10 @@ mod tests {
     #[tokio::test]
     async fn listed_origins_may_read_the_list() {
         let cors = Cors::Origins(vec![PORTAL.into(), "http://localhost:3000".into()]);
-        let etag = mock_etag();
+        let etag = fixture_etag();
         for (extra, expected) in [(None, StatusCode::OK), (Some((header::IF_NONE_MATCH, etag.as_str())), StatusCode::NOT_MODIFIED)] {
             let headers: Vec<_> = [(header::ORIGIN, PORTAL)].into_iter().chain(extra).collect();
-            let (status, headers, _) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
+            let (status, headers, _) = request(FIXTURE, cors.clone(), LIST_PATH, &headers).await;
             assert_eq!(status, expected);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{status}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(addendum_header("CorsExposeHeaders").as_str()));
@@ -682,7 +681,7 @@ mod tests {
         }
         for origin in [None, Some("https://evil.example.org"), Some("https://portal.example.org.evil.org")] {
             let headers: Vec<_> = origin.map(|o| (header::ORIGIN, o)).into_iter().collect();
-            let (status, headers, _) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
+            let (status, headers, _) = request(FIXTURE, cors.clone(), LIST_PATH, &headers).await;
             assert_eq!(status, StatusCode::OK);
             assert!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(), "{origin:?}");
             assert!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS).is_none(), "{origin:?}");
@@ -693,7 +692,7 @@ mod tests {
     /// `*` gives the same headers on 200 and 304, with or without an Origin.
     #[tokio::test]
     async fn any_origin_may_read_the_list() {
-        let etag = mock_etag();
+        let etag = fixture_etag();
         for origin in [Some(PORTAL), None] {
             for tag in [None, Some(etag.as_str())] {
                 let headers: Vec<_> = origin
@@ -701,7 +700,7 @@ mod tests {
                     .into_iter()
                     .chain(tag.map(|t| (header::IF_NONE_MATCH, t)))
                     .collect();
-                let (status, headers, _) = request(MOCK, Cors::Any, LIST_PATH, &headers).await;
+                let (status, headers, _) = request(FIXTURE, Cors::Any, LIST_PATH, &headers).await;
                 let expected = if tag.is_some() { StatusCode::NOT_MODIFIED } else { StatusCode::OK };
                 assert_eq!(status, expected, "{origin:?}");
                 assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{origin:?} {status}");
@@ -725,28 +724,31 @@ mod tests {
         }
     }
 
-    /// The approved entries, in the mock registry's order (the demo's stable
-    /// order), and nothing else.
+    /// The approved entries, in the registry's order (the demo's stable
+    /// order), and nothing else. The fixture interleaves approved and
+    /// unapproved entries out of alphabetical order, so a sorted or unfiltered
+    /// list fails.
     #[tokio::test]
     async fn list_holds_only_approved_entries_in_a_stable_order() {
-        let (_, _, body) = get(MOCK, LIST_PATH, None).await;
+        let (_, _, body) = get(FIXTURE, LIST_PATH, None).await;
         let body: Value = serde_json::from_slice(&body).unwrap();
         let ids: Vec<&str> = body["institutions"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["globus", "uchicago", "utexas", "sdsc", "stanford", "tacc_tapis"]);
+        assert_eq!(ids, ["zeta", "globus", "alpha", "tacc_tapis"]);
+        assert_eq!(body["num_institutions"], ids.len());
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "each id at most once");
-        let (_, _, again) = get(MOCK, LIST_PATH, None).await;
+        let (_, _, again) = get(FIXTURE, LIST_PATH, None).await;
         assert_eq!(serde_json::from_slice::<Value>(&again).unwrap(), body, "same order on every request");
     }
 
     #[tokio::test]
     async fn matching_etag_gets_not_modified() {
-        let etag = mock_etag();
+        let etag = fixture_etag();
         let strong = etag.trim_start_matches("W/").to_string();
         let listed = format!("\"old\", {etag}");
         let malformed_first = format!("garbage, W/\"x, {etag}");
         for tag in [etag.as_str(), &strong, &listed, &malformed_first, "*", " * "] {
-            let (status, headers, body) = get(MOCK, LIST_PATH, Some(tag)).await;
+            let (status, headers, body) = get(FIXTURE, LIST_PATH, Some(tag)).await;
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{tag}");
             assert_eq!(header(&headers, header::ETAG), Some(etag.as_str()));
             assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-cache"));
@@ -756,8 +758,11 @@ mod tests {
         }
         // Another tag; one naming only the data's version (an older context);
         // members that are not entity tags; `*` inside a list.
-        for tag in ["\"old\"", "W/\"old\"", "W/\"mock-0.1.0\"", "mock-0.1.0;r1", "w/\"mock-0.1.0;r1\"", "\"old\", *", "*, \"old\""] {
-            let (status, _, _) = get(MOCK, LIST_PATH, Some(tag)).await;
+        let version_only = format!("W/\"{FIXTURE_VERSION}\"");
+        let unquoted = strong.trim_matches('"').to_string();
+        let lower_weak = format!("w/{strong}");
+        for tag in ["\"old\"", "W/\"old\"", &version_only, &unquoted, &lower_weak, "\"old\", *", "*, \"old\""] {
+            let (status, _, _) = get(FIXTURE, LIST_PATH, Some(tag)).await;
             assert_eq!(status, StatusCode::OK, "{tag}");
         }
     }
@@ -765,10 +770,10 @@ mod tests {
     /// A field that is not valid UTF-8 (obs-text) still has its entity tags read.
     #[tokio::test]
     async fn non_ascii_if_none_match_is_still_read() {
-        let mut bytes = format!("{}, \"", mock_etag()).into_bytes();
+        let mut bytes = format!("{}, \"", fixture_etag()).into_bytes();
         bytes.extend_from_slice(b"\xff\"");
         let headers = [(header::IF_NONE_MATCH, HeaderValue::from_bytes(&bytes).unwrap())];
-        let (status, _, _) = send_to(fixed(MOCK), Cors::SameOrigin, Method::GET, LIST_PATH, &headers).await;
+        let (status, _, _) = send_to(fixed(FIXTURE), Cors::SameOrigin, Method::GET, LIST_PATH, &headers).await;
         assert_eq!(status, StatusCode::NOT_MODIFIED);
     }
 
@@ -787,23 +792,24 @@ mod tests {
     #[tokio::test]
     async fn if_match_passes_only_as_any() {
         let cors = Cors::Origins(vec![PORTAL.into()]);
-        let etag = mock_etag();
-        let (status, _, _) = request(MOCK, cors.clone(), LIST_PATH, &[(header::IF_MATCH, "*")]).await;
+        let etag = fixture_etag();
+        let (status, _, _) = request(FIXTURE, cors.clone(), LIST_PATH, &[(header::IF_MATCH, "*")]).await;
         assert_eq!(status, StatusCode::OK);
         // `*` is valid only as the whole field, so a list holding it fails too.
         let listed = format!("*, {etag}");
-        for tag in [etag.as_str(), "\"mock-0.1.0;r1\"", "\"x\"", "*, \"x\"", &listed] {
+        let strong = etag.trim_start_matches("W/");
+        for tag in [etag.as_str(), strong, "\"x\"", "*, \"x\"", &listed] {
             let headers = [(header::ORIGIN, PORTAL), (header::IF_MATCH, tag), (header::IF_NONE_MATCH, "*")];
-            let (status, headers, body) = request(MOCK, cors.clone(), LIST_PATH, &headers).await;
+            let (status, headers, body) = request(FIXTURE, cors.clone(), LIST_PATH, &headers).await;
             assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{tag}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_EXPOSE_HEADERS), Some(EXPOSE_HEADERS), "{tag}");
         }
         let context = context_path(latest_context().revision);
-        let (status, headers, body) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "\"x\"")]).await;
+        let (status, headers, body) = request(FIXTURE, Cors::SameOrigin, &context, &[(header::IF_MATCH, "\"x\"")]).await;
         assert_error(status, StatusCode::PRECONDITION_FAILED, &headers, &body);
         assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
-        let (status, _, _) = request(MOCK, Cors::SameOrigin, &context, &[(header::IF_MATCH, "*")]).await;
+        let (status, _, _) = request(FIXTURE, Cors::SameOrigin, &context, &[(header::IF_MATCH, "*")]).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -843,7 +849,7 @@ mod tests {
             assert_eq!(header(&out, header::VARY), Some("Origin"));
             assert!(!String::from_utf8_lossy(&body).contains("registry-"), "no file name in {expected}");
         }
-        std::fs::write(&path, MOCK).unwrap();
+        std::fs::write(&path, FIXTURE).unwrap();
         let (status, _, _) = send_to(source, cors, Method::GET, LIST_PATH, &[]).await;
         assert_eq!(status, StatusCode::OK);
         std::fs::remove_file(&path).unwrap();
@@ -862,19 +868,24 @@ mod tests {
                 send_to(source, Cors::SameOrigin, Method::GET, LIST_PATH, &headers).await
             }
         };
-        std::fs::write(&path, MOCK).unwrap();
+        std::fs::write(&path, FIXTURE).unwrap();
         let (_, headers, _) = get_with(None).await;
         let old = headers[header::ETAG].clone();
         assert_eq!(get_with(Some(old.clone())).await.0, StatusCode::NOT_MODIFIED);
 
-        std::fs::write(&path, MOCK.replace("mock-0.1.0", "mock-0.1.1").replace("\"approved\": false", "\"approved\": true")).unwrap();
+        let mut changed: Value = serde_json::from_str(FIXTURE).unwrap();
+        changed["data_version"] = "fixture-2".into();
+        let entries = changed["institutions"].as_array_mut().unwrap();
+        entries.iter_mut().for_each(|e| e["approved"] = true.into());
+        let all = entries.len();
+        std::fs::write(&path, changed.to_string()).unwrap();
         let (status, headers, body) = get_with(Some(old.clone())).await;
         assert_eq!(status, StatusCode::OK, "the old tag no longer matches");
         let new = headers[header::ETAG].clone();
         assert_ne!(new, old);
         let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["data_version"], "mock-0.1.1");
-        assert_eq!(body["num_institutions"], 10, "every entry now approved");
+        assert_eq!(body["data_version"], "fixture-2");
+        assert_eq!(body["num_institutions"], all, "every entry now approved");
         assert_eq!(get_with(Some(new)).await.0, StatusCode::NOT_MODIFIED);
         std::fs::remove_file(&path).unwrap();
     }
@@ -883,7 +894,7 @@ mod tests {
     async fn other_methods_get_method_not_allowed() {
         let cors = Cors::Origins(vec![PORTAL.into()]);
         for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::TRACE] {
-            let (status, headers, body) = send(MOCK, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
+            let (status, headers, body) = send(FIXTURE, cors.clone(), method.clone(), LIST_PATH, &[(header::ORIGIN, PORTAL)]).await;
             assert_error(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
             assert_eq!(header(&headers, header::ALLOW), Some(LIST_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some(PORTAL), "{method}");
@@ -892,7 +903,7 @@ mod tests {
         }
         let context = context_path(latest_context().revision);
         for method in [Method::POST, Method::OPTIONS, Method::DELETE] {
-            let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &context, &[]).await;
+            let (status, headers, body) = send(FIXTURE, Cors::SameOrigin, method.clone(), &context, &[]).await;
             assert_error(status, StatusCode::METHOD_NOT_ALLOWED, &headers, &body);
             assert_eq!(header(&headers, header::ALLOW), Some(CONTEXT_ALLOW), "{method}");
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"), "{method}");
@@ -907,7 +918,7 @@ mod tests {
         for revision in ["0", "01", "+1", "r1", next.as_str()] {
             let path = format!("/v1/tms/contexts/institutions/{revision}");
             for method in [Method::GET, Method::HEAD, Method::POST] {
-                let (status, headers, body) = send(MOCK, Cors::SameOrigin, method.clone(), &path, &[]).await;
+                let (status, headers, body) = send(FIXTURE, Cors::SameOrigin, method.clone(), &path, &[]).await;
                 assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
                 if method != Method::HEAD {
                     assert_error(status, StatusCode::NOT_FOUND, &headers, &body);
@@ -917,12 +928,15 @@ mod tests {
         }
     }
 
+    /// A request to send: its method, path and headers.
+    type Case<'a> = (Method, &'a str, &'a [(header::HeaderName, &'a str)]);
+
     /// Every response, errors and 304s included, forbids content sniffing.
     #[tokio::test]
     async fn every_response_forbids_sniffing() {
         let context = context_path(latest_context().revision);
-        let etag = mock_etag();
-        let cases: &[(Method, &str, &[(header::HeaderName, &str)])] = &[
+        let etag = fixture_etag();
+        let cases: &[Case] = &[
             (Method::GET, LIST_PATH, &[]),
             (Method::GET, LIST_PATH, &[(header::IF_NONE_MATCH, etag.as_str())]),
             (Method::GET, LIST_PATH, &[(header::IF_MATCH, "\"x\"")]),
@@ -934,7 +948,7 @@ mod tests {
             (Method::GET, "/v1/tms/contexts/institutions/0", &[]),
         ];
         for (method, path, headers) in cases {
-            let (status, out, _) = send(MOCK, Cors::Any, method.clone(), path, headers).await;
+            let (status, out, _) = send(FIXTURE, Cors::Any, method.clone(), path, headers).await;
             assert_eq!(header(&out, header::X_CONTENT_TYPE_OPTIONS), Some(spec_header("NoSniff").as_str()), "{method} {path} {status}");
         }
     }
@@ -945,7 +959,7 @@ mod tests {
     async fn every_context_revision_is_served() {
         for ctx in CONTEXTS {
             let path = context_path(ctx.revision);
-            let (status, headers, body) = get(MOCK, &path, None).await;
+            let (status, headers, body) = get(FIXTURE, &path, None).await;
             assert_eq!(status, StatusCode::OK, "{path}");
             assert_eq!(header(&headers, header::CONTENT_TYPE), Some("application/ld+json"));
             assert_eq!(header(&headers, header::ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
@@ -954,12 +968,12 @@ mod tests {
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert!(body["@context"].is_object(), "{path}");
 
-            let (status, headers, body) = get(MOCK, &path, Some("*")).await;
+            let (status, headers, body) = get(FIXTURE, &path, Some("*")).await;
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
             assert!(body.is_empty());
             assert_eq!(header(&headers, header::CACHE_CONTROL), Some(CONTEXT_CACHE_CONTROL));
             assert!(header(&headers, header::CONTENT_TYPE).is_none());
-            let (status, _, _) = get(MOCK, &path, Some("W/\"x\"")).await;
+            let (status, _, _) = get(FIXTURE, &path, Some("W/\"x\"")).await;
             assert_eq!(status, StatusCode::OK, "contexts have no ETag to match");
         }
     }

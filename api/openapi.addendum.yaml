@@ -20,6 +20,12 @@ info:
     what the core requires still holds. Everything the core says about
     requests, header values and errors applies here too.
 
+    The two documents are read side by side, not merged: an operation here
+    with the same `operationId` as one in the core is that same operation.
+    Tools that merge documents into one (`redocly join`, code generators
+    fed both files) see the shared `operationId` as a duplicate, so give
+    them the core alone.
+
     ### Header values
     As in the core: a comma-separated list is a string whose
     `x-required-members` it carries at least, in any order. Header names in
@@ -223,6 +229,13 @@ paths:
         revisions stay served unchanged for clients that cached a `Link` to
         them. A revision's URL never changes content, so it may be cached
         indefinitely, and it has no `ETag`: only `If-None-Match: *` matches.
+
+        Revisions are frozen from `info.version` 1.0.0 on. Until then, an
+        incompatible version of the API may republish a revision with new
+        content (as 0.9.0 and 0.10.0 did with revision 1), and a cache that
+        kept the old content may serve it until it expires; clients of a
+        pre-1.0 version should fetch the context again after the API
+        changes.
 
         Each revision is served byte for byte as the file
         `institutions.context.r<n>.jsonld` next to this document, whose

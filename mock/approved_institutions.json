@@ -7,7 +7,7 @@
       "provider": "globus",
       "redirect_idp_domain": null,
       "idp_logout_url": null,
-      "approved": true
+      "approved": false
     },
     {
       "id": "uchicago",
@@ -31,7 +31,7 @@
       "provider": "globus",
       "redirect_idp_domain": "illinois.edu",
       "idp_logout_url": "https://shibboleth.illinois.edu/idp/profile/Logout",
-      "approved": false
+      "approved": true
     },
     {
       "id": "sdsc",

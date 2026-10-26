@@ -21,8 +21,10 @@ port=18080
 for cors in "" "*" "https://portal.example.org,http://localhost:3000"; do
   port=$((port + 1))
   base="http://127.0.0.1:$port"
-  # A missing DEV_ENV_FILE keeps a local dev.env out of the run.
+  # A missing DEV_ENV_FILE keeps a local dev.env out of the run, and the
+  # tests' fixture stands in for the demo's mock institution data.
   DEV_ENV_FILE="$work/none.env" GLOBUS_MOCK=true BASE_URL="$base" BIND_ADDR="127.0.0.1:$port" \
+    INSTITUTIONS_FILE=tests/fixtures/registry.json \
     CORS_ALLOWED_ORIGINS="$cors" IDP_SIGNING_KEY="$work/key-$port.pem" \
     target/debug/idp_redirect_demo >"$work/server-$port.log" 2>&1 &
   pids+=($!)

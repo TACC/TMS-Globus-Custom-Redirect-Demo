@@ -402,7 +402,9 @@ commit, so nothing needs copying. Gateway credentials go in the
 The context is revised separately from the API: each revision
 (`api/institutions.context.r<n>.jsonld`, served at
 `/v1/tms/contexts/institutions/<n>`) is cached indefinitely, so it never
-changes; a test fails if it does. To change the context, add the next
+changes; a test fails if it does. (Before the spec's 1.0.0, an
+incompatible API version may republish a revision instead, updating its
+hash; the addendum says so.) To change the context, add the next
 revision (`.r2.jsonld`) with a row for it in `CONTEXTS` (in
 `src/institutions_api.rs`), add it to the addendum's `revision` enum and
 its hash to `x-context-sha256`, and point the addendum's `Link` header and

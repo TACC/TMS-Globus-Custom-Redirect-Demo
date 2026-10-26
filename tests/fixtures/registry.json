@@ -1,0 +1,53 @@
+{
+  "data_version": "fixture-1",
+  "institutions": [
+    {
+      "id": "zeta",
+      "name": "Zeta University",
+      "provider": "globus",
+      "redirect_idp_domain": "zeta.edu",
+      "idp_logout_url": "https://idp.zeta.edu/logout",
+      "approved": true
+    },
+    {
+      "id": "beta",
+      "name": "Beta College",
+      "provider": "globus",
+      "redirect_idp_domain": "beta.edu",
+      "idp_logout_url": null,
+      "approved": false
+    },
+    {
+      "id": "globus",
+      "name": "Globus (no redirect)",
+      "provider": "globus",
+      "redirect_idp_domain": null,
+      "idp_logout_url": null,
+      "approved": true
+    },
+    {
+      "id": "alpha",
+      "name": "Alpha Institute",
+      "provider": "globus",
+      "redirect_idp_domain": "alpha.edu",
+      "idp_logout_url": null,
+      "approved": true
+    },
+    {
+      "id": "tacc_tapis",
+      "name": "Tapis OAuth2",
+      "provider": "tacc_tapis",
+      "redirect_idp_domain": null,
+      "idp_logout_url": null,
+      "approved": true
+    },
+    {
+      "id": "omega",
+      "name": "Omega University",
+      "provider": "globus",
+      "redirect_idp_domain": "omega.edu",
+      "idp_logout_url": "https://idp.omega.edu/logout",
+      "approved": false
+    }
+  ]
+}
